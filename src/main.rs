@@ -5,7 +5,8 @@ use std::{
     fs,
     io::{Read, Write},
     net::TcpListener,
-    process::Command,
+    panic,
+    process::{Command, Stdio},
     sync::Mutex,
     time::SystemTime,
 };
@@ -33,10 +34,7 @@ fn main() {
 
     fastcgi::run_tcp(
         move |mut req| {
-            let Ok(mut scripts) = scripts.lock() else {
-                write!(&mut req.stdout(), "Status: 500 Internal Server Error\n\n").unwrap_or(());
-                return;
-            };
+            let mut scripts = scripts.lock().unwrap_or_else(|e| e.into_inner());
 
             let Some(path) = req.param("SCRIPT_FILENAME") else {
                 write!(&mut req.stdout(), "Status: 500 Internal Server Error\n\n").unwrap_or(());
@@ -65,22 +63,29 @@ fn main() {
             {
                 let mut child = Command::new("./cyth")
                     .arg(&path)
-                    .arg(path.clone() + ".wasm")
-                    .stderr(std::process::Stdio::piped())
+                    .arg("stdout")
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
                     .spawn()
                     .unwrap();
 
                 let status = child.wait().unwrap();
 
-                let mut output = String::new();
-                if let Some(stderr) = &mut child.stderr {
-                    stderr.read_to_string(&mut output).unwrap();
+                let mut output = Vec::new();
+                if let Some(stdout) = &mut child.stdout {
+                    stdout.read_to_end(&mut output).unwrap();
+                    println!("{:?}", output);
+                }
 
-                    if output.len() > 0 {
+                let mut errors = String::new();
+                if let Some(stderr) = &mut child.stderr {
+                    stderr.read_to_string(&mut errors).unwrap();
+
+                    if errors.len() > 0 {
                         write!(
                             &mut req.stdout(),
                             "Status: 500 Internal Server Error\n\n{}",
-                            output
+                            errors
                         )
                         .unwrap_or(());
                         return;
@@ -92,7 +97,7 @@ fn main() {
                     write!(caller.data_mut(), "{:?}", poop).unwrap();
                 });
 
-                let module = Module::from_file(&engine, path.clone() + ".wasm").unwrap();
+                let module = Module::from_binary(&engine, &output).unwrap();
                 let instance = Instance::new(&mut store, &module, &[print.into()]).unwrap();
                 let start = instance
                     .get_typed_func::<(), ()>(&mut store, "<start>")
