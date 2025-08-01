@@ -1,6 +1,14 @@
 extern crate fastcgi;
 
-use std::{collections::HashMap, fs, io::Write, net::TcpListener, sync::Mutex, time::SystemTime};
+use std::{
+    collections::HashMap,
+    fs,
+    io::{Read, Write},
+    net::TcpListener,
+    process::Command,
+    sync::Mutex,
+    time::SystemTime,
+};
 
 use wasmtime::{Caller, Config, Engine, Func, Instance, Module, Store, TypedFunc};
 
@@ -55,12 +63,36 @@ fn main() {
                     .modified
                     .ne(&metadata.modified().unwrap())
             {
+                let mut child = Command::new("./cyth")
+                    .arg(&path)
+                    .arg(path.clone() + ".wasm")
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap();
+
+                let status = child.wait().unwrap();
+
+                let mut output = String::new();
+                if let Some(stderr) = &mut child.stderr {
+                    stderr.read_to_string(&mut output).unwrap();
+
+                    if output.len() > 0 {
+                        write!(
+                            &mut req.stdout(),
+                            "Status: 500 Internal Server Error\n\n{}",
+                            output
+                        )
+                        .unwrap_or(());
+                        return;
+                    }
+                }
+
                 let mut store = Store::new(&engine, String::new());
                 let print = Func::wrap(&mut store, |mut caller: Caller<'_, String>, poop: i32| {
                     write!(caller.data_mut(), "{:?}", poop).unwrap();
                 });
 
-                let module = Module::from_file(&engine, &path).unwrap();
+                let module = Module::from_file(&engine, path.clone() + ".wasm").unwrap();
                 let instance = Instance::new(&mut store, &module, &[print.into()]).unwrap();
                 let start = instance
                     .get_typed_func::<(), ()>(&mut store, "<start>")
@@ -75,7 +107,7 @@ fn main() {
                 script.store.data_mut().clear();
                 script.start.call(&mut script.store, ()).unwrap();
 
-                println!("Compiling and running {}", path);
+                println!("Compiling and running {} {}", path, status);
 
                 write!(
                     &mut req.stdout(),
