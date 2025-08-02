@@ -141,8 +141,6 @@ fn process_request(mut req: Request, engine: &Engine, scripts: &Mutex<HashMap<St
             input.extend_from_slice(b"\")\n");
         }
 
-        println!("{}", String::from_utf8_lossy(&input));
-
         let mut child = Command::new("./cyth")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -152,6 +150,7 @@ fn process_request(mut req: Request, engine: &Engine, scripts: &Mutex<HashMap<St
 
         let mut stdin = child.stdin.take().unwrap();
         stdin.write_all(&input).unwrap();
+        drop(stdin);
 
         let status = child.wait_with_output().unwrap();
         let output = status.stdout;
