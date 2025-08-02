@@ -1,10 +1,3 @@
-<?
-  class A
-    int a = 7
-
-  print((string)A().a)
-?>
-
 <!DOCTYPE html>
 <html>
   <head>
@@ -12,8 +5,10 @@
   </head>
   <body>
     <?
-      int i = 0
-      int b = i + 2
+      string[] list = [ "Hello World", "Foobar", "Goobar"]
+
+      for int i = 0; i < list.length; i += 1
+        print("<h1>" + list[i] + "</h1>\n")
     ?>
   </body>
 </html>

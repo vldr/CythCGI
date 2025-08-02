@@ -12,7 +12,10 @@ use std::{
 };
 
 use fastcgi::Request;
-use wasmtime::{Caller, Config, Engine, Func, Instance, Module, Store, TypedFunc};
+use wasmtime::{
+    AsContext, AsContextMut, Caller, Config, Engine, Func, FuncType, Instance, Module, Store,
+    TypedFunc,
+};
 
 struct Script {
     modified: SystemTime,
@@ -167,12 +170,30 @@ fn process_request(mut req: Request, engine: &Engine, scripts: &Mutex<HashMap<St
         }
 
         let mut store = Store::new(&engine, String::new());
-        let print = Func::wrap(&mut store, |mut caller: Caller<'_, String>, poop: i32| {
-            write!(caller.data_mut(), "{:?}", poop).unwrap();
+        let module = Module::from_binary(&engine, &output).unwrap();
+
+        let a = module.imports().find(|a| a.name() == "print").unwrap();
+
+        let func_ty = FuncType::new(&engine, a.ty().unwrap_func().params(), []);
+        let func = Func::new(&mut store, func_ty, |mut poop, params, _results| {
+            let a = params.get(0).unwrap().unwrap_any_ref().unwrap();
+            let a = a.as_array(poop.as_context()).unwrap().unwrap();
+
+            let mut result = String::new();
+
+            for p in a.elems(poop.as_context_mut()).unwrap() {
+                let int_val = p.i32().unwrap();
+                let ch = std::char::from_u32(int_val as u32).unwrap();
+
+                result.push(ch);
+            }
+
+            write!(poop.data_mut(), "{}", result).unwrap();
+
+            Ok(())
         });
 
-        let module = Module::from_binary(&engine, &output).unwrap();
-        let instance = Instance::new(&mut store, &module, &[print.into()]).unwrap();
+        let instance = Instance::new(&mut store, &module, &[func.into()]).unwrap();
         let start = instance
             .get_typed_func::<(), ()>(&mut store, "<start>")
             .unwrap();
