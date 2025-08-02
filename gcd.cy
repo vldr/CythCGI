@@ -1,7 +1,19 @@
-import "env"
-  void log(A n)
+<?
+  class A
+    int a = 7
 
-class A
-  int a = 12
+  print((string)A().a)
+?>
 
-log(A())
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Page Title</title>
+  </head>
+  <body>
+    <?
+      int i = 0
+      int b = i + 2
+    ?>
+  </body>
+</html>
