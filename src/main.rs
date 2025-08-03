@@ -11,18 +11,37 @@ use std::{
 use dashmap::DashMap;
 use fastcgi::Request;
 use wasmtime::{
-    AsContext, AsContextMut, Config, Engine, InstanceAllocationStrategy, InstancePre, Linker,
-    Module, PoolingAllocationConfig, Store,
+    AsContext, AsContextMut, Caller, Config, Engine, InstanceAllocationStrategy, InstancePre,
+    Linker, Module, PoolingAllocationConfig, Store, Val,
 };
 
 struct Script {
     modified: SystemTime,
-    instance_pre: InstancePre<String>,
+    instance_pre: InstancePre<Context>,
+}
+
+#[derive(Default)]
+struct Context {
+    body: String,
 }
 
 const IMPORTS: &str = "import \"env\"
     void print(string n)
 ";
+
+fn val_to_string(caller: &mut Caller<'_, Context>, val: &Val) -> String {
+    let array = val.unwrap_any_ref().unwrap();
+    let array = array.as_array(caller.as_context()).unwrap().unwrap();
+
+    let mut result = String::with_capacity(array.len(caller.as_context()).unwrap() as usize);
+
+    for elem in array.elems(caller.as_context_mut()).unwrap() {
+        let ch = std::char::from_u32(elem.i32().unwrap() as u32).unwrap();
+        result.push(ch);
+    }
+
+    return result;
+}
 
 fn read_script(path: &String) -> String {
     fn dedent(input: &str) -> String {
@@ -55,7 +74,7 @@ fn read_script(path: &String) -> String {
             result.push_str(&line[start..]);
         }
 
-        result.trim_matches('\n').to_owned()
+        result
     }
 
     let input = fs::read_to_string(&path).unwrap();
@@ -116,30 +135,21 @@ fn read_script(path: &String) -> String {
     output
 }
 
-fn link_script(engine: &Engine, module: &Module) -> InstancePre<String> {
-    use std::fmt::Write;
-    let mut linker = Linker::<String>::new(&engine);
+fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
+    let mut linker = Linker::<Context>::new(&engine);
 
-    let func_import = module
+    let func_ty = module
         .imports()
         .find(|func| func.name() == "print")
-        .unwrap();
-    let func_ty = func_import.ty().unwrap_func().clone();
+        .unwrap()
+        .ty()
+        .unwrap_func()
+        .clone();
+
     linker
         .func_new("env", "print", func_ty, |mut caller, params, _results| {
-            let array = params.get(0).unwrap().unwrap_any_ref().unwrap();
-            let array = array.as_array(caller.as_context()).unwrap().unwrap();
-
-            let mut result =
-                String::with_capacity(array.len(caller.as_context()).unwrap() as usize);
-
-            for elem in array.elems(caller.as_context_mut()).unwrap() {
-                let ch = std::char::from_u32(elem.i32().unwrap() as u32).unwrap();
-
-                result.push(ch);
-            }
-
-            write!(caller.data_mut(), "{}", result).unwrap();
+            let result = val_to_string(&mut caller, params.get(0).unwrap());
+            caller.data_mut().body.push_str(&result);
 
             Ok(())
         })
@@ -148,8 +158,8 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<String> {
     linker.instantiate_pre(&module).unwrap()
 }
 
-fn run_script(req: &mut Request, engine: &Engine, instance_pre: &InstancePre<String>) {
-    let mut store = Store::new(engine, String::new());
+fn run_script(req: &mut Request, engine: &Engine, instance_pre: &InstancePre<Context>) {
+    let mut store = Store::new(engine, Context::default());
     let instance = instance_pre.instantiate(&mut store).unwrap();
     let start = instance
         .get_typed_func::<(), ()>(&mut store, "<start>")
@@ -160,7 +170,7 @@ fn run_script(req: &mut Request, engine: &Engine, instance_pre: &InstancePre<Str
     write!(
         &mut req.stdout(),
         "Content-Type: text/html; charset=UTF-8\n\n{}",
-        store.data()
+        store.data().body
     )
     .unwrap_or(());
 }

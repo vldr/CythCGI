@@ -10,7 +10,7 @@ void printer()
 <!DOCTYPE html>
 <html>
   <head>
-    <title>Page Title</title>
+    <title><? print("Hello World") ?></title>
   </head>
   <body>
     <?
@@ -20,6 +20,5 @@ void printer()
     ?>
   </body>
 </html>
- <?
-
- printer()
+<?
+  printer()
