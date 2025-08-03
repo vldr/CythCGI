@@ -7,3 +7,8 @@ edition = "2024"
 dashmap = "6.1.0"
 fastcgi = "1.0.0"
 wasmtime = "35.0.0"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"

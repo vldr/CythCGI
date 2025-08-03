@@ -127,14 +127,14 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<String> {
     let func_ty = func_import.ty().unwrap_func().clone();
     linker
         .func_new("env", "print", func_ty, |mut caller, params, _results| {
-            let a = params.get(0).unwrap().unwrap_any_ref().unwrap();
-            let a = a.as_array(caller.as_context()).unwrap().unwrap();
+            let array = params.get(0).unwrap().unwrap_any_ref().unwrap();
+            let array = array.as_array(caller.as_context()).unwrap().unwrap();
 
-            let mut result = String::new();
+            let mut result =
+                String::with_capacity(array.len(caller.as_context()).unwrap() as usize);
 
-            for p in a.elems(caller.as_context_mut()).unwrap() {
-                let int_val = p.i32().unwrap();
-                let ch = std::char::from_u32(int_val as u32).unwrap();
+            for elem in array.elems(caller.as_context_mut()).unwrap() {
+                let ch = std::char::from_u32(elem.i32().unwrap() as u32).unwrap();
 
                 result.push(ch);
             }
@@ -159,7 +159,7 @@ fn run_script(req: &mut Request, engine: &Engine, instance_pre: &InstancePre<Str
 
     write!(
         &mut req.stdout(),
-        "Content-Type: text/plain\n\n{}",
+        "Content-Type: text/html; charset=UTF-8\n\n{}",
         store.data()
     )
     .unwrap_or(());
