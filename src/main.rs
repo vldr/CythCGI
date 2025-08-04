@@ -1,20 +1,24 @@
 extern crate fastcgi;
 
 use std::{
-    cmp, fs,
+    cmp,
+    env::{self, args},
+    fs,
     io::Write,
     net::TcpListener,
     process::{Command, Stdio},
-    time::SystemTime,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use chrono::{DateTime, Local};
 use regex::Regex;
 
 use dashmap::DashMap;
 use fastcgi::Request;
 use wasmtime::{
-    AsContext, AsContextMut, Caller, Config, Engine, InstanceAllocationStrategy, InstancePre,
-    Linker, Module, PoolingAllocationConfig, Store, Val,
+    ArrayRef, ArrayRefPre, ArrayType, AsContext, AsContextMut, Caller, Config, Engine, FieldType,
+    InstanceAllocationStrategy, InstancePre, Linker, Module, Mutability, PoolingAllocationConfig,
+    StorageType, Store, Val,
 };
 
 struct Script {
@@ -28,7 +32,9 @@ struct Context {
 }
 
 const IMPORTS: &str = "import \"env\"
-    void print(string n)
+    void print(string output)
+    int now()
+    string date(int time, string n)
 ";
 
 fn val_to_string(caller: &mut Caller<'_, Context>, val: &Val) -> String {
@@ -43,6 +49,24 @@ fn val_to_string(caller: &mut Caller<'_, Context>, val: &Val) -> String {
     }
 
     return result;
+}
+
+fn string_to_val(caller: &mut Caller<'_, Context>, string: String) -> Val {
+    let array_ty = ArrayType::new(
+        caller.engine(),
+        FieldType::new(Mutability::Var, StorageType::I8),
+    );
+
+    let allocator = ArrayRefPre::new(caller.as_context_mut(), array_ty);
+
+    let mut list = Vec::<Val>::with_capacity(string.len());
+    for byte in string.as_bytes() {
+        list.push(Val::I32(*byte as i32));
+    }
+
+    let array = ArrayRef::new_fixed(caller.as_context_mut(), &allocator, &list).unwrap();
+
+    return Val::AnyRef(Some(array.to_anyref()));
 }
 
 fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
@@ -192,6 +216,48 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
             .unwrap();
     }
 
+    if let Some(func_ty) = module.imports().find(|func| func.name() == "date") {
+        linker
+            .func_new(
+                "env",
+                "date",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, params, results| {
+                    let epoch = params.get(0).unwrap().i32().unwrap();
+                    let format = val_to_string(&mut caller, params.get(1).unwrap());
+
+                    let datetime =
+                        DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs(epoch as u64));
+                    let result = datetime.format(&format).to_string();
+
+                    results[0] = string_to_val(&mut caller, result);
+
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module.imports().find(|func| func.name() == "now") {
+        linker
+            .func_new(
+                "env",
+                "now",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut _caller, _params, results| {
+                    results[0] = Val::I32(
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs() as i32,
+                    );
+
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
     linker.instantiate_pre(&module).unwrap()
 }
 
@@ -240,7 +306,7 @@ fn request(mut req: Request, engine: &Engine, scripts: &DashMap<String, Script>)
     {
         drop(script);
 
-        let mut child = Command::new("./cyth")
+        let mut child = Command::new(args().nth(2).unwrap())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -307,6 +373,11 @@ fn request(mut req: Request, engine: &Engine, scripts: &DashMap<String, Script>)
 }
 
 fn main() {
+    if env::args().count() < 3 {
+        println!("usage: cyth-cgi [address] [cyth executable]");
+        return;
+    }
+
     let mut pool = PoolingAllocationConfig::new();
     pool.total_gc_heaps(10000);
     pool.total_core_instances(10000);
@@ -319,7 +390,7 @@ fn main() {
 
     let engine = Engine::new(&config).unwrap();
 
-    let listener = TcpListener::bind("127.0.0.1:1237").unwrap();
+    let listener = TcpListener::bind(args().nth(1).unwrap()).unwrap();
     let scripts = DashMap::<String, Script>::new();
 
     fastcgi::run_tcp(move |req| request(req, &engine, &scripts), &listener);

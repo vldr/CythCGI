@@ -1,9 +1,10 @@
 [package]
-name = "CythCGI"
+name = "cyth-cgi"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+chrono = "0.4.41"
 dashmap = "6.1.0"
 fastcgi = "1.0.0"
 regex = "1.11.1"

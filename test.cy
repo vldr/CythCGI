@@ -13,7 +13,7 @@ void printer()
 <!DOCTYPE html>
 <html>
   <head>
-    <title><?print("Hello World")?><?2  +  2?></title>
+    <title><?print("Hello World")?><? print(date(now(), "%Y-%m-%d %H:%M:%S"))?></title>
   </head>
   <body>
     <?
