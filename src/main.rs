@@ -8,6 +8,8 @@ use std::{
     time::SystemTime,
 };
 
+use regex::Regex;
+
 use dashmap::DashMap;
 use fastcgi::Request;
 use wasmtime::{
@@ -43,8 +45,13 @@ fn val_to_string(caller: &mut Caller<'_, Context>, val: &Val) -> String {
     return result;
 }
 
-fn read_script(path: &String) -> String {
-    fn dedent(input: &str) -> String {
+fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
+    fn dedent(
+        input: &str,
+        mapping: &mut Vec<(i32, i32)>,
+        mut line: i32,
+        mut column: i32,
+    ) -> String {
         let lines: Vec<&str> = input.lines().collect();
         if lines.is_empty() {
             return "".to_owned();
@@ -58,20 +65,24 @@ fn read_script(path: &String) -> String {
             .unwrap_or(0);
 
         let mut result = String::new();
-        let mut first = true;
 
-        for line in lines {
-            if !first {
-                result.push('\n');
-            }
-            first = false;
-
-            if line.trim().is_empty() {
+        for text in lines {
+            if text.trim().is_empty() {
                 continue;
             }
 
-            let start = cmp::min(min_indent, line.len() - line.trim_start().len());
-            result.push_str(&line[start..]);
+            let start = cmp::min(min_indent, text.len() - text.trim_start().len());
+
+            mapping.push((line, (column - 1) + start as i32));
+
+            result.push_str(&text[start..]);
+            result.push_str(
+                format!(" # {} -> {}, {}:{}", mapping.len(), line, column, start).as_str(),
+            );
+            result.push('\n');
+
+            line += 1;
+            column = 1;
         }
 
         result
@@ -81,8 +92,18 @@ fn read_script(path: &String) -> String {
     let mut output = String::new();
     output += IMPORTS;
 
-    let mut start = 0;
     let mut code = false;
+    let mut mapping = Vec::<(i32, i32)>::new();
+    let mut line = 1;
+    let mut column = 1;
+
+    for _ in IMPORTS.lines() {
+        mapping.push((0, 0));
+    }
+
+    let mut start = 0;
+    let mut start_line = 0;
+    let mut start_column = 0;
 
     fn hex_from_digit(num: u8) -> char {
         if num < 10 {
@@ -93,10 +114,17 @@ fn read_script(path: &String) -> String {
     }
 
     for i in 0..input.len() {
+        if input.as_bytes()[i] == b'\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+
         if code {
             if input.as_bytes()[i] == b'?' && i + 1 < input.len() && input.as_bytes()[i + 1] == b'>'
             {
-                output += &dedent(&input[start..i]);
+                output += &dedent(&input[start..i], &mut mapping, start_line, start_column);
 
                 start = i + 2;
                 code = false;
@@ -104,7 +132,8 @@ fn read_script(path: &String) -> String {
         } else {
             if input.as_bytes()[i] == b'<' && i + 1 < input.len() && input.as_bytes()[i + 1] == b'?'
             {
-                if i != start {
+                mapping.push((line, column));
+                if start < i {
                     output += "\nprint(\"";
                     for c in input[start..i].as_bytes() {
                         output += "\\x";
@@ -114,6 +143,8 @@ fn read_script(path: &String) -> String {
                     output += "\")\n";
                 }
 
+                start_column = column + 1;
+                start_line = line;
                 start = i + 2;
                 code = true;
             }
@@ -121,18 +152,24 @@ fn read_script(path: &String) -> String {
     }
 
     if code {
-        output += &dedent(&input[start..]);
+        output += &dedent(&input[start..], &mut mapping, start_line, start_column);
     } else {
-        output += "\nprint(\"";
-        for c in input[start..].as_bytes() {
-            output += "\\x";
-            output.push(hex_from_digit(c / 16));
-            output.push(hex_from_digit(c % 16));
+        mapping.push((line, column));
+        if start < input.len() {
+            output += "\nprint(\"";
+            for c in input[start..].as_bytes() {
+                output += "\\x";
+                output.push(hex_from_digit(c / 16));
+                output.push(hex_from_digit(c % 16));
+            }
+            output += "\")\n";
         }
-        output += "\")\n";
     }
 
-    output
+    println!("{}", output);
+    // assert_eq!(output.lines().count(), mapping.len());
+
+    (output, mapping)
 }
 
 fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
@@ -211,7 +248,7 @@ fn request(mut req: Request, engine: &Engine, scripts: &DashMap<String, Script>)
             .unwrap();
 
         let mut stdin = child.stdin.take().unwrap();
-        let input = read_script(&path);
+        let (input, mapping) = read_script(&path);
         stdin.write_all(input.as_bytes()).unwrap();
         drop(stdin);
 
@@ -220,10 +257,35 @@ fn request(mut req: Request, engine: &Engine, scripts: &DashMap<String, Script>)
 
         let errors = String::from_utf8_lossy(&status.stderr);
         if errors.len() > 0 {
+            let re =
+                Regex::new(r"\(null\):([0-9]+):([0-9]+)-([0-9]+):([0-9]+): error: (.*)").unwrap();
+
+            let mut result = String::new();
+
+            for caps in re.captures_iter(&errors) {
+                let (_, [start_line, start_column, end_line, end_column, message]) = caps.extract();
+
+                let start_line = start_line.parse::<usize>().unwrap();
+                let start_column = start_column.parse::<i32>().unwrap();
+                let end_line = end_line.parse::<usize>().unwrap();
+                let end_column = end_column.parse::<i32>().unwrap();
+
+                result.push_str(&format!(
+                    "{}:{}:{}-{}:{}: {}\n",
+                    path,
+                    mapping[start_line].0,
+                    mapping[start_line].1 + start_column,
+                    mapping[end_line].0,
+                    mapping[end_line].1 + end_column,
+                    message
+                ));
+            }
+
             write!(
                 &mut req.stdout(),
-                "Status: 500 Internal Server Error\n\n{}",
-                errors.replace("(null)", &path)
+                "Status: 500 Internal Server Error\n\n{}\n{}",
+                result,
+                errors
             )
             .unwrap_or(());
             return;
