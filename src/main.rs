@@ -53,9 +53,6 @@ fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
         mut column: i32,
     ) -> String {
         let lines: Vec<&str> = input.lines().collect();
-        if lines.is_empty() {
-            return "".to_owned();
-        }
 
         let min_indent = lines
             .iter()
@@ -68,18 +65,17 @@ fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
 
         for text in lines {
             if text.trim().is_empty() {
+                line += 1;
+                column = 1;
+
                 continue;
             }
 
             let start = cmp::min(min_indent, text.len() - text.trim_start().len());
+            result.push_str(&text[start..]);
+            result.push('\n');
 
             mapping.push((line, (column - 1) + start as i32));
-
-            result.push_str(&text[start..]);
-            result.push_str(
-                format!(" # {} -> {}, {}:{}", mapping.len(), line, column, start).as_str(),
-            );
-            result.push('\n');
 
             line += 1;
             column = 1;
@@ -102,8 +98,8 @@ fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
     }
 
     let mut start = 0;
-    let mut start_line = 0;
-    let mut start_column = 0;
+    let mut start_line = 1;
+    let mut start_column = 1;
 
     fn hex_from_digit(num: u8) -> char {
         if num < 10 {
@@ -126,6 +122,8 @@ fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
             {
                 output += &dedent(&input[start..i], &mut mapping, start_line, start_column);
 
+                start_column = column + 1;
+                start_line = line;
                 start = i + 2;
                 code = false;
             }
@@ -133,7 +131,7 @@ fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
             if input.as_bytes()[i] == b'<' && i + 1 < input.len() && input.as_bytes()[i + 1] == b'?'
             {
                 if start < i {
-                    mapping.push((line, column));
+                    mapping.push((start_line, start_column - 1));
 
                     output += "print(\"";
                     for c in input[start..i].as_bytes() {
@@ -156,7 +154,7 @@ fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
         output += &dedent(&input[start..], &mut mapping, start_line, start_column);
     } else {
         if start < input.len() {
-            mapping.push((line, column));
+            mapping.push((start_line, start_column - 1));
 
             output += "print(\"";
             for c in input[start..].as_bytes() {
@@ -168,8 +166,9 @@ fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
         }
     }
 
-    println!("{}", output);
-    // assert_eq!(output.lines().count(), mapping.len());
+    assert_eq!(output.lines().count(), mapping.len());
+
+    mapping.push((line, column - 1));
 
     (output, mapping)
 }
@@ -177,22 +176,21 @@ fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
 fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
     let mut linker = Linker::<Context>::new(&engine);
 
-    let func_ty = module
-        .imports()
-        .find(|func| func.name() == "print")
-        .unwrap()
-        .ty()
-        .unwrap_func()
-        .clone();
+    if let Some(func_ty) = module.imports().find(|func| func.name() == "print") {
+        linker
+            .func_new(
+                "env",
+                "print",
+                func_ty.ty().func().unwrap().clone(),
+                |mut caller, params, _results| {
+                    let result = val_to_string(&mut caller, params.get(0).unwrap());
+                    caller.data_mut().body.push_str(&result);
 
-    linker
-        .func_new("env", "print", func_ty, |mut caller, params, _results| {
-            let result = val_to_string(&mut caller, params.get(0).unwrap());
-            caller.data_mut().body.push_str(&result);
-
-            Ok(())
-        })
-        .unwrap();
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
 
     linker.instantiate_pre(&module).unwrap()
 }
@@ -285,9 +283,8 @@ fn request(mut req: Request, engine: &Engine, scripts: &DashMap<String, Script>)
 
             write!(
                 &mut req.stdout(),
-                "Status: 500 Internal Server Error\n\n{}\n{}",
+                "Status: 500 Internal Server Error\n\n{}",
                 result,
-                errors
             )
             .unwrap_or(());
             return;

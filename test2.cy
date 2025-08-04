@@ -104,9 +104,7 @@
 
           print((int)bright + ", ")
 
-        print("\n\n")
-
-    ?>
+        print("\n\n")?>
 
   ];
 
