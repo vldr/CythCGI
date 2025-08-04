@@ -132,9 +132,10 @@ fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
         } else {
             if input.as_bytes()[i] == b'<' && i + 1 < input.len() && input.as_bytes()[i + 1] == b'?'
             {
-                mapping.push((line, column));
                 if start < i {
-                    output += "\nprint(\"";
+                    mapping.push((line, column));
+
+                    output += "print(\"";
                     for c in input[start..i].as_bytes() {
                         output += "\\x";
                         output.push(hex_from_digit(c / 16));
@@ -154,9 +155,10 @@ fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
     if code {
         output += &dedent(&input[start..], &mut mapping, start_line, start_column);
     } else {
-        mapping.push((line, column));
         if start < input.len() {
-            output += "\nprint(\"";
+            mapping.push((line, column));
+
+            output += "print(\"";
             for c in input[start..].as_bytes() {
                 output += "\\x";
                 output.push(hex_from_digit(c / 16));
@@ -273,10 +275,10 @@ fn request(mut req: Request, engine: &Engine, scripts: &DashMap<String, Script>)
                 result.push_str(&format!(
                     "{}:{}:{}-{}:{}: {}\n",
                     path,
-                    mapping[start_line].0,
-                    mapping[start_line].1 + start_column,
-                    mapping[end_line].0,
-                    mapping[end_line].1 + end_column,
+                    mapping[start_line - 1].0,
+                    mapping[start_line - 1].1 + start_column,
+                    mapping[end_line - 1].0,
+                    mapping[end_line - 1].1 + end_column,
                     message
                 ));
             }

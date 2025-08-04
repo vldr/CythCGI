@@ -13,7 +13,7 @@ uu printer()
 <!DOCTYPE html>
 <html>
   <head>
-    <title><?pprint("Hello World")?></title>
+    <title><?pprint("Hello World")?><?1  +  2?></title>
   </head>
   <body>
     <?
