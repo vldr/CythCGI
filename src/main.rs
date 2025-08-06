@@ -2,11 +2,13 @@ extern crate fastcgi;
 
 use std::{
     cmp,
+    collections::HashMap,
     env::{self, args},
     fs,
     io::Write,
     net::TcpListener,
     process::{Command, ExitCode, Stdio},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -31,6 +33,7 @@ struct Script {
 #[derive(Default)]
 struct Context {
     body: String,
+    environs: Arc<HashMap<String, String>>,
 }
 
 const IMPORTS: &str = "import \"env\"
@@ -38,12 +41,14 @@ const IMPORTS: &str = "import \"env\"
     void println(string a)
     void printBuffer(char[] a)
 
+    string getEnviron(string key)
+    string[] getEnvirons()
+
     string date(int a, string b)
     int now()
 
     any sqlite_open(string a)
     bool sqlite_execute(any a, string b)
-
     any sqlite_prepare(any a, string b)
     bool sqlite_bind<T>(any a, int b, T c)
     bool sqlite_bind_null(any a, int b)
@@ -88,6 +93,49 @@ class Statement
     bool next()
         return sqlite_next(stmt)
 ";
+
+fn string_array_to_val(caller: &mut Caller<'_, Context>, buf: &Vec<&String>) -> Val {
+    let string_ty = ArrayType::new(
+        caller.engine(),
+        FieldType::new(Mutability::Var, StorageType::I8),
+    );
+    let string_ref_ty = RefType::new(false, HeapType::ConcreteArray(string_ty.clone()));
+
+    let array_ty = ArrayType::new(
+        caller.engine(),
+        FieldType::new(Mutability::Var, ValType::Ref(string_ref_ty.clone()).into()),
+    );
+    let array_ref_ty = RefType::new(true, HeapType::ConcreteArray(array_ty.clone()));
+
+    let struct_ty = StructType::new(
+        caller.engine(),
+        [
+            FieldType::new(Mutability::Var, ValType::Ref(array_ref_ty).into()),
+            FieldType::new(Mutability::Var, ValType::I32.into()),
+        ],
+    )
+    .unwrap();
+
+    let struct_allocator = StructRefPre::new(caller.as_context_mut(), struct_ty);
+    let array_allocator = ArrayRefPre::new(caller.as_context_mut(), array_ty);
+
+    let list_len = buf.len();
+    let mut list = Vec::<Val>::with_capacity(list_len);
+
+    for string in buf {
+        list.push(string_to_val(caller, &string));
+    }
+
+    let array = ArrayRef::new_fixed(caller.as_context_mut(), &array_allocator, &list).unwrap();
+    let class = StructRef::new(
+        caller.as_context_mut(),
+        &struct_allocator,
+        &[array.into(), Val::I32(list_len as i32)],
+    )
+    .unwrap();
+
+    Val::AnyRef(Some(class.to_anyref()))
+}
 
 fn val_to_char_array(caller: &mut Caller<'_, Context>, val: &Val) -> Vec<u8> {
     let class = val.unwrap_any_ref().unwrap();
@@ -174,7 +222,7 @@ fn val_to_externref<'a, T: 'static>(
     data
 }
 
-fn string_to_val(caller: &mut Caller<'_, Context>, string: String) -> Val {
+fn string_to_val(caller: &mut Caller<'_, Context>, string: &String) -> Val {
     let array_ty = ArrayType::new(
         caller.engine(),
         FieldType::new(Mutability::Var, StorageType::I8),
@@ -387,7 +435,7 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                         DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs(epoch as u64));
                     let result = datetime.format(&format).to_string();
 
-                    results[0] = string_to_val(&mut caller, result);
+                    results[0] = string_to_val(&mut caller, &result);
 
                     Ok(())
                 },
@@ -409,6 +457,42 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                             .as_secs() as i32,
                     );
 
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module.imports().find(|func| func.name() == "getEnviron") {
+        linker
+            .func_new(
+                "env",
+                "getEnviron",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, params, results| {
+                    let environs = caller.data().environs.clone();
+                    let key = val_to_string(&mut caller, params.get(0).unwrap());
+                    let default = String::new();
+                    let value = environs.get(&key).unwrap_or(&default);
+
+                    results[0] = string_to_val(&mut caller, &value);
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module.imports().find(|func| func.name() == "getEnvirons") {
+        linker
+            .func_new(
+                "env",
+                "getEnvirons",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, _params, results| {
+                    let environs = caller.data().environs.clone();
+                    let list: Vec<&String> = environs.keys().collect();
+
+                    results[0] = string_array_to_val(&mut caller, &list);
                     Ok(())
                 },
             )
@@ -669,7 +753,7 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
 
                     let result: String = statement.read(value.as_str()).unwrap_or_default();
 
-                    results[0] = string_to_val(&mut caller, result);
+                    results[0] = string_to_val(&mut caller, &result);
                     Ok(())
                 },
             )
@@ -772,7 +856,13 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
 }
 
 fn run_script(req: &mut Request, engine: &Engine, instance_pre: &InstancePre<Context>) {
-    let mut store = Store::new(engine, Context::default());
+    let mut store = Store::new(
+        engine,
+        Context {
+            body: String::default(),
+            environs: req.params(),
+        },
+    );
     let instance = instance_pre.instantiate(&mut store).unwrap();
     let start = instance
         .get_typed_func::<(), ()>(&mut store, "<start>")
