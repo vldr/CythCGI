@@ -45,7 +45,7 @@
   const pixels = [
 
     <?
-
+      char[] buffer
       for int y = 0; y < width; y += 1
 
         for int x = 0; x < height; x += 1
@@ -100,11 +100,19 @@
 
             bright = 0.0
 
+          
 
+          string f = (string)(int)bright
 
-          print((int)bright + ", ")
+          buffer.push(f[0])
+          buffer.push(' ')
+          buffer.push(',')
 
-        print("\n\n")?>
+        buffer.push('\n')
+        buffer.push('\n')
+      
+      printBuffer(buffer)
+      ?>
 
   ];
 

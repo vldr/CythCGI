@@ -9,6 +9,7 @@ dashmap = "6.1.0"
 fastcgi = "1.0.0"
 regex = "1.11.1"
 wasmtime = "35.0.0"
+sqlite = { path = "sqlite" }
 
 [profile.release]
 lto = "fat"

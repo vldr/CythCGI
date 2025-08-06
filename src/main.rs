@@ -6,7 +6,7 @@ use std::{
     fs,
     io::Write,
     net::TcpListener,
-    process::{Command, Stdio},
+    process::{Command, ExitCode, Stdio},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -15,10 +15,12 @@ use regex::Regex;
 
 use dashmap::DashMap;
 use fastcgi::Request;
+use sqlite::{Connection, ConnectionThreadSafe, State, Statement, Value};
 use wasmtime::{
-    ArrayRef, ArrayRefPre, ArrayType, AsContext, AsContextMut, Caller, Config, Engine, FieldType,
-    InstanceAllocationStrategy, InstancePre, Linker, Module, Mutability, PoolingAllocationConfig,
-    StorageType, Store, Val,
+    AnyRef, ArrayRef, ArrayRefPre, ArrayType, AsContext, AsContextMut, Caller, Config, Engine,
+    ExternRef, FieldType, HeapType, InstanceAllocationStrategy, InstancePre, Linker, Module,
+    Mutability, PoolingAllocationConfig, RefType, StorageType, Store, StructRef, StructRefPre,
+    StructType, Val, ValType,
 };
 
 struct Script {
@@ -32,23 +34,144 @@ struct Context {
 }
 
 const IMPORTS: &str = "import \"env\"
-    void print(string output)
+    void print(string a)
+    void println(string a)
+    void printBuffer(char[] a)
+
+    string date(int a, string b)
     int now()
-    string date(int time, string n)
+
+    any sqlite_open(string a)
+    bool sqlite_execute(any a, string b)
+
+    any sqlite_prepare(any a, string b)
+    bool sqlite_bind<T>(any a, int b, T c)
+    bool sqlite_bind_null(any a, int b)
+    bool sqlite_next(any a)
+    bool sqlite_read_null(any a, string b)
+    T sqlite_read<T>(any a, string b)
+
+class Connection
+    any con
+
+    void __init__(string path)
+        this.con = sqlite_open(path)
+
+    Statement prepare(string query)
+        any stmt = sqlite_prepare(con, query)
+        if stmt
+            return Statement(stmt)
+
+        return null
+
+    bool execute(string a)
+        return sqlite_execute(con, a)
+
+class Statement
+    any stmt
+
+    void __init__(any stmt)
+        this.stmt = stmt
+
+    T read<T>(string column)
+        return sqlite_read<T>(stmt, column)
+
+    bool readNull(string column)
+        return sqlite_read_null(stmt, column)
+
+    bool bind<T>(int index, T value)
+        return sqlite_bind<T>(stmt, index, value)
+    
+    bool bindNull(int index)
+        return sqlite_bind_null(stmt, index)
+
+    bool next()
+        return sqlite_next(stmt)
 ";
+
+fn val_to_char_array(caller: &mut Caller<'_, Context>, val: &Val) -> Vec<u8> {
+    let class = val.unwrap_any_ref().unwrap();
+    let class = class.unwrap_struct(caller.as_context()).unwrap();
+
+    let size = class.field(caller.as_context_mut(), 1).unwrap();
+    let size = size.unwrap_i32();
+
+    let array = class.field(caller.as_context_mut(), 0).unwrap();
+    let array = array.unwrap_any_ref().unwrap();
+    let array = array.as_array(caller.as_context()).unwrap().unwrap();
+
+    let mut result = Vec::with_capacity(size as usize);
+
+    for elem in array.elems(caller.as_context_mut()).unwrap() {
+        result.push(elem.i32().unwrap() as u8);
+    }
+
+    result
+}
+
+fn char_array_to_val(caller: &mut Caller<'_, Context>, buf: Vec<u8>) -> Val {
+    let array_ty = ArrayType::new(
+        caller.engine(),
+        FieldType::new(Mutability::Var, ValType::I32.into()),
+    );
+
+    let array_ref_ty = RefType::new(true, HeapType::ConcreteArray(array_ty.clone()));
+
+    let struct_ty = StructType::new(
+        caller.engine(),
+        [
+            FieldType::new(Mutability::Var, ValType::Ref(array_ref_ty).into()),
+            FieldType::new(Mutability::Var, ValType::I32.into()),
+        ],
+    )
+    .unwrap();
+
+    let struct_allocator = StructRefPre::new(caller.as_context_mut(), struct_ty);
+    let array_allocator = ArrayRefPre::new(caller.as_context_mut(), array_ty);
+
+    let mut list = Vec::<Val>::with_capacity(buf.len());
+    for byte in &buf {
+        list.push(Val::I32(*byte as i32));
+    }
+
+    let array = ArrayRef::new_fixed(caller.as_context_mut(), &array_allocator, &list).unwrap();
+    let class = StructRef::new(
+        caller.as_context_mut(),
+        &struct_allocator,
+        &[array.into(), Val::I32(buf.len() as i32)],
+    )
+    .unwrap();
+
+    Val::AnyRef(Some(class.to_anyref()))
+}
 
 fn val_to_string(caller: &mut Caller<'_, Context>, val: &Val) -> String {
     let array = val.unwrap_any_ref().unwrap();
     let array = array.as_array(caller.as_context()).unwrap().unwrap();
 
     let mut result = String::with_capacity(array.len(caller.as_context()).unwrap() as usize);
-
     for elem in array.elems(caller.as_context_mut()).unwrap() {
         let ch = std::char::from_u32(elem.i32().unwrap() as u32).unwrap();
         result.push(ch);
     }
 
-    return result;
+    result
+}
+
+fn val_to_externref<'a, T: 'static>(
+    caller: &'a mut Caller<'_, Context>,
+    val: &'a Val,
+) -> &'a mut T {
+    let any_ref = val.unwrap_any_ref().unwrap();
+    let extern_ref = ExternRef::convert_any(caller.as_context_mut(), *any_ref).unwrap();
+    let data = extern_ref
+        .data_mut(caller.as_context_mut())
+        .unwrap()
+        .unwrap();
+
+    let data = data.downcast_mut::<T>().unwrap();
+
+    data
 }
 
 fn string_to_val(caller: &mut Caller<'_, Context>, string: String) -> Val {
@@ -66,7 +189,7 @@ fn string_to_val(caller: &mut Caller<'_, Context>, string: String) -> Val {
 
     let array = ArrayRef::new_fixed(caller.as_context_mut(), &allocator, &list).unwrap();
 
-    return Val::AnyRef(Some(array.to_anyref()));
+    Val::AnyRef(Some(array.to_anyref()))
 }
 
 fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
@@ -108,7 +231,7 @@ fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
         result
     }
 
-    let input = fs::read_to_string(&path).unwrap();
+    let input = fs::read_to_string(path).unwrap();
     let mut output = String::new();
     output += IMPORTS;
 
@@ -158,7 +281,7 @@ fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
                     mapping.push((start_line, start_column - 1));
 
                     output += "print(\"";
-                    for c in input[start..i].as_bytes() {
+                    for c in &input.as_bytes()[start..i] {
                         output += "\\x";
                         output.push(hex_from_digit(c / 16));
                         output.push(hex_from_digit(c % 16));
@@ -181,7 +304,7 @@ fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
             mapping.push((start_line, start_column - 1));
 
             output += "print(\"";
-            for c in input[start..].as_bytes() {
+            for c in &input.as_bytes()[start..] {
                 output += "\\x";
                 output.push(hex_from_digit(c / 16));
                 output.push(hex_from_digit(c % 16));
@@ -198,7 +321,7 @@ fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
 }
 
 fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
-    let mut linker = Linker::<Context>::new(&engine);
+    let mut linker = Linker::<Context>::new(engine);
 
     if let Some(func_ty) = module.imports().find(|func| func.name() == "print") {
         linker
@@ -208,6 +331,40 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 func_ty.ty().func().unwrap().clone(),
                 |mut caller, params, _results| {
                     let result = val_to_string(&mut caller, params.get(0).unwrap());
+                    caller.data_mut().body.push_str(&result);
+
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module.imports().find(|func| func.name() == "println") {
+        linker
+            .func_new(
+                "env",
+                "println",
+                func_ty.ty().func().unwrap().clone(),
+                |mut caller, params, _results| {
+                    let result = val_to_string(&mut caller, params.get(0).unwrap());
+                    caller.data_mut().body.push_str(&result);
+                    caller.data_mut().body.push('\n');
+
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module.imports().find(|func| func.name() == "printBuffer") {
+        linker
+            .func_new(
+                "env",
+                "printBuffer",
+                func_ty.ty().func().unwrap().clone(),
+                |mut caller, params, _results| {
+                    let result = val_to_char_array(&mut caller, params.get(0).unwrap());
+                    let result = unsafe { String::from_utf8_unchecked(result) };
                     caller.data_mut().body.push_str(&result);
 
                     Ok(())
@@ -258,7 +415,360 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
             .unwrap();
     }
 
-    linker.instantiate_pre(&module).unwrap()
+    if let Some(func_ty) = module.imports().find(|func| func.name() == "sqlite_open") {
+        linker
+            .func_new(
+                "env",
+                "sqlite_open",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, params, results| {
+                    let path = val_to_string(&mut caller, params.get(0).unwrap());
+                    let connection = Connection::open_thread_safe(path);
+
+                    if connection.is_err() {
+                        results[0] = Val::null_any_ref();
+                    } else {
+                        let extern_ref =
+                            ExternRef::new(caller.as_context_mut(), connection.unwrap()).unwrap();
+                        let any_ref =
+                            AnyRef::convert_extern(caller.as_context_mut(), extern_ref).unwrap();
+
+                        results[0] = Val::AnyRef(Some(any_ref));
+                    }
+
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module
+        .imports()
+        .find(|func| func.name() == "sqlite_execute")
+    {
+        linker
+            .func_new(
+                "env",
+                "sqlite_execute",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, params, results| {
+                    let query = val_to_string(&mut caller, params.get(1).unwrap());
+                    let connection: &ConnectionThreadSafe =
+                        val_to_externref(&mut caller, params.get(0).unwrap());
+                    let result = connection.execute(&query);
+
+                    results[0] = Val::I32(result.is_ok().into());
+
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module
+        .imports()
+        .find(|func| func.name() == "sqlite_prepare")
+    {
+        linker
+            .func_new(
+                "env",
+                "sqlite_prepare",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller: Caller<'_, Context>, params, results| {
+                    let query = val_to_string(&mut caller, params.get(1).unwrap());
+                    let connection: &ConnectionThreadSafe =
+                        val_to_externref(&mut caller, params.get(0).unwrap());
+
+                    let statement = connection.prepare(query);
+
+                    if statement.is_err() {
+                        results[0] = Val::null_any_ref();
+                    } else {
+                        let extern_ref =
+                            ExternRef::new(caller.as_context_mut(), statement.unwrap()).unwrap();
+                        let any_ref =
+                            AnyRef::convert_extern(caller.as_context_mut(), extern_ref).unwrap();
+
+                        results[0] = Val::AnyRef(Some(any_ref));
+                    }
+
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module
+        .imports()
+        .find(|func| func.name() == "sqlite_bind<string>")
+    {
+        linker
+            .func_new(
+                "env",
+                "sqlite_bind<string>",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, params, results| {
+                    let index = params.get(1).unwrap().unwrap_i32();
+                    let value = val_to_string(&mut caller, params.get(2).unwrap());
+                    let statement: &mut Statement =
+                        val_to_externref(&mut caller, params.get(0).unwrap());
+
+                    let result = statement.bind((index as usize, value.as_str()));
+
+                    results[0] = Val::I32(result.is_ok().into());
+
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module
+        .imports()
+        .find(|func| func.name() == "sqlite_bind<int>")
+    {
+        linker
+            .func_new(
+                "env",
+                "sqlite_bind<int>",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, params, results| {
+                    let index = params.get(1).unwrap().unwrap_i32();
+                    let value = params.get(2).unwrap().unwrap_i32();
+                    let statement: &mut Statement =
+                        val_to_externref(&mut caller, params.get(0).unwrap());
+
+                    let result = statement.bind((index as usize, value as i64));
+
+                    results[0] = Val::I32(result.is_ok().into());
+
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module
+        .imports()
+        .find(|func| func.name() == "sqlite_bind<float>")
+    {
+        linker
+            .func_new(
+                "env",
+                "sqlite_bind<float>",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, params, results| {
+                    let index = params.get(1).unwrap().unwrap_i32();
+                    let value = params.get(2).unwrap().unwrap_f32();
+                    let statement: &mut Statement =
+                        val_to_externref(&mut caller, params.get(0).unwrap());
+
+                    let result = statement.bind((index as usize, value as f64));
+
+                    results[0] = Val::I32(result.is_ok().into());
+
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module
+        .imports()
+        .find(|func| func.name() == "sqlite_bind<char[]>")
+    {
+        linker
+            .func_new(
+                "env",
+                "sqlite_bind<char[]>",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, params, results| {
+                    let index = params.get(1).unwrap().unwrap_i32();
+                    let value = val_to_char_array(&mut caller, params.get(2).unwrap());
+                    let statement: &mut Statement =
+                        val_to_externref(&mut caller, params.get(0).unwrap());
+
+                    let result = statement.bind((index as usize, value.as_slice()));
+
+                    results[0] = Val::I32(result.is_ok().into());
+
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module
+        .imports()
+        .find(|func| func.name() == "sqlite_bind_null")
+    {
+        linker
+            .func_new(
+                "env",
+                "sqlite_bind_null",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, params, results| {
+                    let index = params.get(1).unwrap().unwrap_i32();
+                    let statement: &mut Statement =
+                        val_to_externref(&mut caller, params.get(0).unwrap());
+
+                    let result = statement.bind((index as usize, sqlite::Value::Null));
+
+                    results[0] = Val::I32(result.is_ok().into());
+
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module.imports().find(|func| func.name() == "sqlite_next") {
+        linker
+            .func_new(
+                "env",
+                "sqlite_next",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, params, results| {
+                    let statement: &mut Statement =
+                        val_to_externref(&mut caller, params.get(0).unwrap());
+
+                    let state = statement.next();
+
+                    match state {
+                        Ok(state) => {
+                            if state == State::Row {
+                                results[0] = Val::I32(1);
+                            } else {
+                                results[0] = Val::I32(0);
+                            }
+                        }
+                        Err(_) => {
+                            results[0] = Val::I32(0);
+                        }
+                    }
+
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module
+        .imports()
+        .find(|func| func.name() == "sqlite_read<string>")
+    {
+        linker
+            .func_new(
+                "env",
+                "sqlite_read<string>",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, params, results| {
+                    let value = val_to_string(&mut caller, params.get(1).unwrap());
+                    let statement: &mut Statement =
+                        val_to_externref(&mut caller, params.get(0).unwrap());
+
+                    let result: String = statement.read(value.as_str()).unwrap_or_default();
+
+                    results[0] = string_to_val(&mut caller, result);
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module
+        .imports()
+        .find(|func| func.name() == "sqlite_read<int>")
+    {
+        linker
+            .func_new(
+                "env",
+                "sqlite_read<int>",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, params, results| {
+                    let value = val_to_string(&mut caller, params.get(1).unwrap());
+                    let statement: &mut Statement =
+                        val_to_externref(&mut caller, params.get(0).unwrap());
+
+                    let result: i64 = statement.read(value.as_str()).unwrap_or_default();
+
+                    results[0] = Val::I32(result as i32);
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module
+        .imports()
+        .find(|func| func.name() == "sqlite_read<float>")
+    {
+        linker
+            .func_new(
+                "env",
+                "sqlite_read<float>",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, params, results| {
+                    let value = val_to_string(&mut caller, params.get(1).unwrap());
+                    let statement: &mut Statement =
+                        val_to_externref(&mut caller, params.get(0).unwrap());
+
+                    let result: f64 = statement.read(value.as_str()).unwrap_or_default();
+
+                    results[0] = Val::F32(f32::to_bits(result as f32));
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module
+        .imports()
+        .find(|func| func.name() == "sqlite_read<char[]>")
+    {
+        linker
+            .func_new(
+                "env",
+                "sqlite_read<char[]>",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, params, results| {
+                    let value = val_to_string(&mut caller, params.get(1).unwrap());
+                    let statement: &mut Statement =
+                        val_to_externref(&mut caller, params.get(0).unwrap());
+
+                    let result: Vec<u8> = statement.read(value.as_str()).unwrap_or_default();
+
+                    results[0] = char_array_to_val(&mut caller, result);
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module
+        .imports()
+        .find(|func| func.name() == "sqlite_read_null")
+    {
+        linker
+            .func_new(
+                "env",
+                "sqlite_read_null",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, params, results| {
+                    let value = val_to_string(&mut caller, params.get(1).unwrap());
+                    let statement: &mut Statement =
+                        val_to_externref(&mut caller, params.get(0).unwrap());
+
+                    let result: Value = statement.read(value.as_str()).unwrap_or_default();
+
+                    results[0] = Val::I32((result == Value::Null) as i32);
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    linker.instantiate_pre(module).unwrap()
 }
 
 fn run_script(req: &mut Request, engine: &Engine, instance_pre: &InstancePre<Context>) {
@@ -306,7 +816,7 @@ fn request(mut req: Request, engine: &Engine, scripts: &DashMap<String, Script>)
     {
         drop(script);
 
-        let mut child = Command::new(args().nth(2).unwrap())
+        let mut child = Command::new(args().nth(1).unwrap())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -322,7 +832,7 @@ fn request(mut req: Request, engine: &Engine, scripts: &DashMap<String, Script>)
         let output = status.stdout;
 
         let errors = String::from_utf8_lossy(&status.stderr);
-        if errors.len() > 0 {
+        if !errors.is_empty() {
             let re =
                 Regex::new(r"\(null\):([0-9]+):([0-9]+)-([0-9]+):([0-9]+): error: (.*)").unwrap();
 
@@ -356,8 +866,8 @@ fn request(mut req: Request, engine: &Engine, scripts: &DashMap<String, Script>)
             return;
         }
 
-        let module = Module::from_binary(&engine, &output).unwrap();
-        let instance_pre = link_script(&engine, &module);
+        let module = Module::from_binary(engine, &output).unwrap();
+        let instance_pre = link_script(engine, &module);
         run_script(&mut req, engine, &instance_pre);
 
         let script = Script {
@@ -372,26 +882,39 @@ fn request(mut req: Request, engine: &Engine, scripts: &DashMap<String, Script>)
     }
 }
 
-fn main() {
-    if env::args().count() < 3 {
-        println!("usage: cyth-cgi [address] [cyth executable]");
-        return;
+fn main() -> ExitCode {
+    if env::args().count() < 2 {
+        println!("usage: cyth-cgi <cyth executable> [listen address]");
+        return ExitCode::FAILURE;
     }
 
     let mut pool = PoolingAllocationConfig::new();
-    pool.total_gc_heaps(10000);
-    pool.total_core_instances(10000);
+    pool.total_gc_heaps(1000);
+    pool.total_core_instances(1000);
 
     let mut config = Config::new();
     config.wasm_gc(true);
+    config.collector(wasmtime::Collector::Null);
     config.wasm_reference_types(true);
     config.wasm_function_references(true);
     config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
 
     let engine = Engine::new(&config).unwrap();
-
-    let listener = TcpListener::bind(args().nth(1).unwrap()).unwrap();
     let scripts = DashMap::<String, Script>::new();
 
-    fastcgi::run_tcp(move |req| request(req, &engine, &scripts), &listener);
+    if env::args().count() > 2 {
+        let listener = TcpListener::bind(args().nth(2).unwrap()).unwrap();
+        fastcgi::run_tcp(move |req| request(req, &engine, &scripts), &listener);
+    } else {
+        #[cfg(unix)]
+        {
+            fastcgi::run(move |req| request(req, &engine, &scripts));
+        }
+        #[cfg(not(unix))]
+        {
+            panic!("Unix sockets are not supported on this platform");
+        }
+    }
+
+    ExitCode::SUCCESS
 }
