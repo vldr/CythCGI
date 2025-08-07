@@ -1,6 +1,6 @@
 <?
 
-Connection connection = Connection(":memory:")
+Database connection = Database(":memory:")
 bool result = connection.execute("
   CREATE TABLE IF NOT EXISTS users (name TEXT, age INTEGER);
   INSERT INTO users VALUES ('Alice', 42);

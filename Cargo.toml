@@ -14,4 +14,3 @@ fastcgi = { path = "vendor/fastcgi" }
 [profile.release]
 lto = "fat"
 codegen-units = 1
-panic = "abort"

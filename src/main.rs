@@ -7,6 +7,7 @@ use std::{
     fs,
     io::Write,
     net::TcpListener,
+    panic::{AssertUnwindSafe, catch_unwind},
     process::{Command, ExitCode, Stdio},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -47,30 +48,30 @@ const IMPORTS: &str = "import \"env\"
     string date(int a, string b)
     int now()
 
-    any sqlite_open(string a)
-    bool sqlite_execute(any a, string b)
-    any sqlite_prepare(any a, string b)
-    bool sqlite_bind<T>(any a, int b, T c)
-    bool sqlite_bind_null(any a, int b)
-    bool sqlite_next(any a)
-    bool sqlite_read_null(any a, string b)
-    T sqlite_read<T>(any a, string b)
+    any sqliteOpen(string a)
+    bool sqliteExecute(any a, string b)
+    any sqlitePrepare(any a, string b)
+    bool sqliteBind<T>(any a, int b, T c)
+    bool sqliteBindNull(any a, int b)
+    bool sqliteNext(any a)
+    bool sqliteReadNull(any a, string b)
+    T sqliteRead<T>(any a, string b)
 
-class Connection
+class Database
     any con
 
     void __init__(string path)
-        this.con = sqlite_open(path)
+        this.con = sqliteOpen(path)
 
     Statement prepare(string query)
-        any stmt = sqlite_prepare(con, query)
+        any stmt = sqlitePrepare(con, query)
         if stmt
             return Statement(stmt)
 
         return null
 
     bool execute(string a)
-        return sqlite_execute(con, a)
+        return sqliteExecute(con, a)
 
 class Statement
     any stmt
@@ -79,19 +80,19 @@ class Statement
         this.stmt = stmt
 
     T read<T>(string column)
-        return sqlite_read<T>(stmt, column)
+        return sqliteRead<T>(stmt, column)
 
     bool readNull(string column)
-        return sqlite_read_null(stmt, column)
+        return sqliteReadNull(stmt, column)
 
     bool bind<T>(int index, T value)
-        return sqlite_bind<T>(stmt, index, value)
+        return sqliteBind<T>(stmt, index, value)
     
     bool bindNull(int index)
-        return sqlite_bind_null(stmt, index)
+        return sqliteBindNull(stmt, index)
 
     bool next()
-        return sqlite_next(stmt)
+        return sqliteNext(stmt)
 ";
 
 fn string_array_to_val(caller: &mut Caller<'_, Context>, buf: &Vec<&String>) -> Val {
@@ -150,7 +151,11 @@ fn val_to_char_array(caller: &mut Caller<'_, Context>, val: &Val) -> Vec<u8> {
 
     let mut result = Vec::with_capacity(size as usize);
 
-    for elem in array.elems(caller.as_context_mut()).unwrap() {
+    for elem in array
+        .elems(caller.as_context_mut())
+        .unwrap()
+        .take(size as usize)
+    {
         result.push(elem.i32().unwrap() as u8);
     }
 
@@ -499,11 +504,11 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
             .unwrap();
     }
 
-    if let Some(func_ty) = module.imports().find(|func| func.name() == "sqlite_open") {
+    if let Some(func_ty) = module.imports().find(|func| func.name() == "sqliteOpen") {
         linker
             .func_new(
                 "env",
-                "sqlite_open",
+                "sqliteOpen",
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, results| {
                     let path = val_to_string(&mut caller, params.get(0).unwrap());
@@ -526,14 +531,11 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
             .unwrap();
     }
 
-    if let Some(func_ty) = module
-        .imports()
-        .find(|func| func.name() == "sqlite_execute")
-    {
+    if let Some(func_ty) = module.imports().find(|func| func.name() == "sqliteExecute") {
         linker
             .func_new(
                 "env",
-                "sqlite_execute",
+                "sqliteExecute",
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, results| {
                     let query = val_to_string(&mut caller, params.get(1).unwrap());
@@ -549,14 +551,11 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
             .unwrap();
     }
 
-    if let Some(func_ty) = module
-        .imports()
-        .find(|func| func.name() == "sqlite_prepare")
-    {
+    if let Some(func_ty) = module.imports().find(|func| func.name() == "sqlitePrepare") {
         linker
             .func_new(
                 "env",
-                "sqlite_prepare",
+                "sqlitePrepare",
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller: Caller<'_, Context>, params, results| {
                     let query = val_to_string(&mut caller, params.get(1).unwrap());
@@ -584,12 +583,12 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
 
     if let Some(func_ty) = module
         .imports()
-        .find(|func| func.name() == "sqlite_bind<string>")
+        .find(|func| func.name() == "sqliteBind<string>")
     {
         linker
             .func_new(
                 "env",
-                "sqlite_bind<string>",
+                "sqliteBind<string>",
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, results| {
                     let index = params.get(1).unwrap().unwrap_i32();
@@ -609,12 +608,12 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
 
     if let Some(func_ty) = module
         .imports()
-        .find(|func| func.name() == "sqlite_bind<int>")
+        .find(|func| func.name() == "sqliteBind<int>")
     {
         linker
             .func_new(
                 "env",
-                "sqlite_bind<int>",
+                "sqliteBind<int>",
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, results| {
                     let index = params.get(1).unwrap().unwrap_i32();
@@ -634,12 +633,12 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
 
     if let Some(func_ty) = module
         .imports()
-        .find(|func| func.name() == "sqlite_bind<float>")
+        .find(|func| func.name() == "sqliteBind<float>")
     {
         linker
             .func_new(
                 "env",
-                "sqlite_bind<float>",
+                "sqliteBind<float>",
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, results| {
                     let index = params.get(1).unwrap().unwrap_i32();
@@ -659,12 +658,12 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
 
     if let Some(func_ty) = module
         .imports()
-        .find(|func| func.name() == "sqlite_bind<char[]>")
+        .find(|func| func.name() == "sqliteBind<char[]>")
     {
         linker
             .func_new(
                 "env",
-                "sqlite_bind<char[]>",
+                "sqliteBind<char[]>",
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, results| {
                     let index = params.get(1).unwrap().unwrap_i32();
@@ -684,12 +683,12 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
 
     if let Some(func_ty) = module
         .imports()
-        .find(|func| func.name() == "sqlite_bind_null")
+        .find(|func| func.name() == "sqliteBindNull")
     {
         linker
             .func_new(
                 "env",
-                "sqlite_bind_null",
+                "sqliteBindNull",
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, results| {
                     let index = params.get(1).unwrap().unwrap_i32();
@@ -706,11 +705,11 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
             .unwrap();
     }
 
-    if let Some(func_ty) = module.imports().find(|func| func.name() == "sqlite_next") {
+    if let Some(func_ty) = module.imports().find(|func| func.name() == "sqliteNext") {
         linker
             .func_new(
                 "env",
-                "sqlite_next",
+                "sqliteNext",
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, results| {
                     let statement: &mut Statement =
@@ -739,12 +738,12 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
 
     if let Some(func_ty) = module
         .imports()
-        .find(|func| func.name() == "sqlite_read<string>")
+        .find(|func| func.name() == "sqliteRead<string>")
     {
         linker
             .func_new(
                 "env",
-                "sqlite_read<string>",
+                "sqliteRead<string>",
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, results| {
                     let value = val_to_string(&mut caller, params.get(1).unwrap());
@@ -762,12 +761,12 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
 
     if let Some(func_ty) = module
         .imports()
-        .find(|func| func.name() == "sqlite_read<int>")
+        .find(|func| func.name() == "sqliteRead<int>")
     {
         linker
             .func_new(
                 "env",
-                "sqlite_read<int>",
+                "sqliteRead<int>",
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, results| {
                     let value = val_to_string(&mut caller, params.get(1).unwrap());
@@ -785,12 +784,12 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
 
     if let Some(func_ty) = module
         .imports()
-        .find(|func| func.name() == "sqlite_read<float>")
+        .find(|func| func.name() == "sqliteRead<float>")
     {
         linker
             .func_new(
                 "env",
-                "sqlite_read<float>",
+                "sqliteRead<float>",
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, results| {
                     let value = val_to_string(&mut caller, params.get(1).unwrap());
@@ -808,12 +807,12 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
 
     if let Some(func_ty) = module
         .imports()
-        .find(|func| func.name() == "sqlite_read<char[]>")
+        .find(|func| func.name() == "sqliteRead<char[]>")
     {
         linker
             .func_new(
                 "env",
-                "sqlite_read<char[]>",
+                "sqliteRead<char[]>",
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, results| {
                     let value = val_to_string(&mut caller, params.get(1).unwrap());
@@ -831,12 +830,12 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
 
     if let Some(func_ty) = module
         .imports()
-        .find(|func| func.name() == "sqlite_read_null")
+        .find(|func| func.name() == "sqliteReadNull")
     {
         linker
             .func_new(
                 "env",
-                "sqlite_read_null",
+                "sqliteReadNull",
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, results| {
                     let value = val_to_string(&mut caller, params.get(1).unwrap());
@@ -879,96 +878,104 @@ fn run_script(req: &mut Request, engine: &Engine, instance_pre: &InstancePre<Con
 }
 
 fn request(mut req: Request, engine: &Engine, scripts: &DashMap<String, Script>) {
-    let Some(path) = req.param("SCRIPT_FILENAME") else {
-        write!(&mut req.stdout(), "Status: 500 Internal Server Error\n\n").unwrap_or(());
-        return;
-    };
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let Some(path) = req.param("SCRIPT_FILENAME") else {
+            panic!("Missing 'SCRIPT_FILENAME' environment variable")
+        };
 
-    let Ok(metadata) = fs::metadata(&path) else {
-        write!(
-            &mut req.stdout(),
-            "{}{}",
-            "Status: 404 Not Found\n",
-            "Content-Type: text/plain\n\n"
-        )
-        .unwrap_or(());
-
-        return;
-    };
-
-    let script = scripts.get(&path);
-    if script.is_none()
-        || script
-            .as_ref()
-            .unwrap()
-            .modified
-            .ne(&metadata.modified().unwrap())
-    {
-        drop(script);
-
-        let mut child = Command::new(args().nth(1).unwrap())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-
-        let mut stdin = child.stdin.take().unwrap();
-        let (input, mapping) = read_script(&path);
-        stdin.write_all(input.as_bytes()).unwrap();
-        drop(stdin);
-
-        let status = child.wait_with_output().unwrap();
-        let output = status.stdout;
-
-        let errors = String::from_utf8_lossy(&status.stderr);
-        if !errors.is_empty() {
-            let re =
-                Regex::new(r"\(null\):([0-9]+):([0-9]+)-([0-9]+):([0-9]+): error: (.*)").unwrap();
-
-            let mut result = String::new();
-
-            for caps in re.captures_iter(&errors) {
-                let (_, [start_line, start_column, end_line, end_column, message]) = caps.extract();
-
-                let start_line = start_line.parse::<usize>().unwrap();
-                let start_column = start_column.parse::<i32>().unwrap();
-                let end_line = end_line.parse::<usize>().unwrap();
-                let end_column = end_column.parse::<i32>().unwrap();
-
-                result.push_str(&format!(
-                    "{}:{}:{}-{}:{}: {}\n",
-                    path,
-                    mapping[start_line - 1].0,
-                    mapping[start_line - 1].1 + start_column,
-                    mapping[end_line - 1].0,
-                    mapping[end_line - 1].1 + end_column,
-                    message
-                ));
-            }
-
+        let Ok(metadata) = fs::metadata(&path) else {
             write!(
                 &mut req.stdout(),
-                "Status: 500 Internal Server Error\n\n{}",
-                result,
+                "{}{}",
+                "Status: 404 Not Found\n",
+                "Content-Type: text/plain\n\n"
             )
             .unwrap_or(());
             return;
-        }
-
-        let module = Module::from_binary(engine, &output).unwrap();
-        let instance_pre = link_script(engine, &module);
-        run_script(&mut req, engine, &instance_pre);
-
-        let script = Script {
-            modified: metadata.modified().unwrap(),
-            instance_pre,
         };
 
-        scripts.insert(path, script);
-    } else {
-        let script = script.unwrap();
-        run_script(&mut req, engine, &script.instance_pre);
+        let script = scripts.get(&path);
+        if script.is_none()
+            || script
+                .as_ref()
+                .unwrap()
+                .modified
+                .ne(&metadata.modified().unwrap())
+        {
+            drop(script);
+
+            let mut child = Command::new(args().nth(1).unwrap())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+
+            let mut stdin = child.stdin.take().unwrap();
+            let (input, mapping) = read_script(&path);
+            stdin.write_all(input.as_bytes()).unwrap();
+            drop(stdin);
+
+            let status = child.wait_with_output().unwrap();
+            let output = status.stdout;
+
+            let errors = String::from_utf8_lossy(&status.stderr);
+            if !errors.is_empty() {
+                let re = Regex::new(r"\(null\):([0-9]+):([0-9]+)-([0-9]+):([0-9]+): error: (.*)")
+                    .unwrap();
+
+                let mut result = String::new();
+
+                for caps in re.captures_iter(&errors) {
+                    let (_, [start_line, start_column, end_line, end_column, message]) =
+                        caps.extract();
+
+                    let start_line = start_line.parse::<usize>().unwrap();
+                    let start_column = start_column.parse::<i32>().unwrap();
+                    let end_line = end_line.parse::<usize>().unwrap();
+                    let end_column = end_column.parse::<i32>().unwrap();
+
+                    result.push_str(&format!(
+                        "{}:{}:{}-{}:{}: {}\n",
+                        path,
+                        mapping[start_line - 1].0,
+                        mapping[start_line - 1].1 + start_column,
+                        mapping[end_line - 1].0,
+                        mapping[end_line - 1].1 + end_column,
+                        message
+                    ));
+                }
+
+                panic!("{}", result);
+            }
+
+            let module = Module::from_binary(engine, &output).unwrap();
+            let instance_pre = link_script(engine, &module);
+            run_script(&mut req, engine, &instance_pre);
+
+            let script = Script {
+                modified: metadata.modified().unwrap(),
+                instance_pre,
+            };
+
+            scripts.insert(path, script);
+        } else {
+            let script = script.unwrap();
+            run_script(&mut req, engine, &script.instance_pre);
+        }
+    }));
+
+    if let Err(error) = result {
+        let reason = error
+            .downcast::<String>()
+            .unwrap_or(Box::new("Internal Server Error".to_owned()));
+
+        write!(
+            &mut req.stdout(),
+            "Status: 500 Internal Server Error\n\n{}",
+            reason,
+        )
+        .unwrap_or(());
     }
 }
 
