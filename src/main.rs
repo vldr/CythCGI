@@ -5,7 +5,7 @@ use std::{
     collections::HashMap,
     env::{self, args},
     fs,
-    io::Write,
+    io::{Read, Write},
     net::TcpListener,
     panic::{AssertUnwindSafe, catch_unwind},
     process::{Command, ExitCode, Stdio},
@@ -33,7 +33,8 @@ struct Script {
 
 #[derive(Default)]
 struct Context {
-    body: String,
+    input: String,
+    output: String,
     environs: Arc<HashMap<String, String>>,
 }
 
@@ -41,6 +42,8 @@ const IMPORTS: &str = "import \"env\"
     void print(string a)
     void println(string a)
     void printBuffer(char[] a)
+
+    string body()
 
     string getEnviron(string key)
     string[] getEnvirons()
@@ -64,8 +67,8 @@ int stringIndexOf(string s, string target)
     for int i = 0; i <= s.length - target.length; i += 1
         bool match = true
 
-        for int j = 0; j < target.length; j += 1
-            if s[i + j] != target[j]
+        for char c in target
+            if s[i + it] != c
                 match = false
                 break
 
@@ -97,9 +100,9 @@ string[] stringSplit(string s, char delim)
     string[] result
     char[] current
 
-    for int i = 0; i < s.length; i += 1
-        if s[i] != delim
-            current.push(s[i])
+    for char c in s
+        if c != delim
+            current.push(c)
         else
             result.push(current.toString())
             current.clear()
@@ -113,13 +116,13 @@ string stringJoin(string[] parts, string delim)
     string[] result
     char[] buf
 
-    for int i = 0; i < parts.length; i += 1
-        for int j = 0; j < parts[i].length; j += 1
-            buf.push(parts[i][j])
+    for string part in parts
+        for char c in part
+            buf.push(c)
 
-        if i != parts.length - 1
-            for int j = 0; j < delim.length; j += 1
-                buf.push(delim[j])
+        if it != parts.length - 1
+            for char c in delim
+                buf.push(c)
 
     return buf.toString()
 
@@ -450,7 +453,7 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 func_ty.ty().func().unwrap().clone(),
                 |mut caller, params, _results| {
                     let result = val_to_string(&mut caller, params.get(0).unwrap());
-                    caller.data_mut().body.push_str(&result);
+                    caller.data_mut().output.push_str(&result);
 
                     Ok(())
                 },
@@ -466,8 +469,8 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 func_ty.ty().func().unwrap().clone(),
                 |mut caller, params, _results| {
                     let result = val_to_string(&mut caller, params.get(0).unwrap());
-                    caller.data_mut().body.push_str(&result);
-                    caller.data_mut().body.push('\n');
+                    caller.data_mut().output.push_str(&result);
+                    caller.data_mut().output.push('\n');
 
                     Ok(())
                 },
@@ -484,8 +487,26 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 |mut caller, params, _results| {
                     let result = val_to_char_array(&mut caller, params.get(0).unwrap());
                     let result = unsafe { String::from_utf8_unchecked(result) };
-                    caller.data_mut().body.push_str(&result);
+                    caller.data_mut().output.push_str(&result);
 
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module.imports().find(|func| func.name() == "body") {
+        linker
+            .func_new(
+                "env",
+                "body",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, _params, results| {
+                    let input = std::mem::take(&mut caller.data_mut().input);
+                    let body = string_to_val(&mut caller, &input);
+
+                    caller.data_mut().input = input;
+                    results[0] = body;
                     Ok(())
                 },
             )
@@ -921,11 +942,17 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
 }
 
 fn run_script(req: &mut Request, engine: &Engine, instance_pre: &InstancePre<Context>) {
+    let environs = req.params();
+    let output = String::new();
+    let mut input = String::new();
+    req.stdin().read_to_string(&mut input).unwrap();
+
     let mut store = Store::new(
         engine,
         Context {
-            body: String::default(),
-            environs: req.params(),
+            input,
+            output,
+            environs,
         },
     );
     let instance = instance_pre.instantiate(&mut store).unwrap();
@@ -938,7 +965,7 @@ fn run_script(req: &mut Request, engine: &Engine, instance_pre: &InstancePre<Con
     write!(
         &mut req.stdout(),
         "Content-Type: text/html; charset=UTF-8\n\n{}",
-        store.data().body
+        store.data().output
     )
     .unwrap_or(());
 }
