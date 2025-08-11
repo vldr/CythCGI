@@ -35,6 +35,7 @@ struct Script {
 struct Context {
     input: String,
     output: String,
+    headers: String,
     environs: Arc<HashMap<String, String>>,
 }
 
@@ -44,6 +45,7 @@ const IMPORTS: &str = "import \"env\"
     void printBuffer(char[] a)
 
     string body()
+    void header(string value)
 
     string getEnviron(string key)
     string[] getEnvirons()
@@ -81,6 +83,9 @@ bool stringContains(string s, string target)
     return stringIndexOf(s, target) != -1
 
 string stringTrim(string s)
+    if not s
+        return s
+
     int start = 0
     int end = s.length - 1
 
@@ -107,9 +112,7 @@ string[] stringSplit(string s, char delim)
             result.push(current.toString())
             current.clear()
 
-    if current.length
-        result.push(current.toString())
-
+    result.push(current.toString())
     return result
 
 string stringJoin(string[] parts, string delim)
@@ -125,6 +128,57 @@ string stringJoin(string[] parts, string delim)
                 buf.push(c)
 
     return buf.toString()
+
+string[][] parseQuery(string query)
+    string[][] result
+
+    string[] pairs = stringSplit(query, '&')
+    for string pair in pairs
+        string[] parts = stringSplit(pair, '=')
+
+        if parts.length == 2
+        result.push([ parts[0], parts[1] ])
+
+    return result
+
+int parseInt(string n, int base)
+    n = stringTrim(n)
+    if not n
+        return 0
+
+    int index = 0
+    bool negative = false
+
+    if n[0] == '+'
+        index += 1
+    else if n[0] == '-'
+        negative = true
+        index += 1
+
+    int value = 0
+    while index < n.length
+        char c = n[index]
+        int digit
+
+        if c >= '0' and c <= '9'
+            digit = c - '0'
+        else if c >= 'A' and c <= 'Z'
+            digit = c - 'A' + 10
+        else if c >= 'a' and c <= 'z'
+            digit = c - 'a' + 10
+        else
+            break
+
+        if digit >= base
+            break
+
+        value = value * base + digit
+        index += 1
+
+    if negative
+        value = -value
+
+    return value
 
 class Database
     any con
@@ -507,6 +561,23 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
 
                     caller.data_mut().input = input;
                     results[0] = body;
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module.imports().find(|func| func.name() == "header") {
+        linker
+            .func_new(
+                "env",
+                "header",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, params, _results| {
+                    let header = val_to_string(&mut caller, params.get(0).unwrap());
+                    caller.data_mut().headers.push_str(header.trim());
+                    caller.data_mut().headers.push('\n');
+
                     Ok(())
                 },
             )
@@ -943,6 +1014,7 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
 
 fn run_script(req: &mut Request, engine: &Engine, instance_pre: &InstancePre<Context>) {
     let environs = req.params();
+    let headers = String::new();
     let output = String::new();
     let mut input = String::new();
     req.stdin().read_to_string(&mut input).unwrap();
@@ -950,6 +1022,7 @@ fn run_script(req: &mut Request, engine: &Engine, instance_pre: &InstancePre<Con
     let mut store = Store::new(
         engine,
         Context {
+            headers,
             input,
             output,
             environs,
@@ -962,9 +1035,17 @@ fn run_script(req: &mut Request, engine: &Engine, instance_pre: &InstancePre<Con
 
     start.call(&mut store, ()).unwrap();
 
+    if !store.data().headers.contains("Content-Type:") {
+        store
+            .data_mut()
+            .headers
+            .push_str("Content-Type: text/html; charset=UTF-8\n");
+    }
+
     write!(
         &mut req.stdout(),
-        "Content-Type: text/html; charset=UTF-8\n\n{}",
+        "{}\n{}",
+        store.data().headers,
         store.data().output
     )
     .unwrap_or(());
