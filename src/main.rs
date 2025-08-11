@@ -1216,9 +1216,13 @@ fn request(mut req: Request, engine: &Engine, scripts: &DashMap<String, Script>)
     }));
 
     if let Err(error) = result {
-        let reason = error
-            .downcast::<String>()
-            .unwrap_or(Box::new("Internal Server Error".to_owned()));
+        let reason = match error.downcast::<String>() {
+            Ok(s) => *s,
+            Err(e) => match e.downcast::<&'static str>() {
+                Ok(s) => (*s).to_string(),
+                Err(_) => "Internal Server Error".to_owned(),
+            },
+        };
 
         write!(
             &mut req.stdout(),
