@@ -13,6 +13,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use bcrypt::{DEFAULT_COST, hash, verify};
 use chrono::{DateTime, Local};
 use regex::Regex;
 
@@ -43,6 +44,9 @@ const IMPORTS: &str = "import \"env\"
     void print(string a)
     void println(string a)
     void printBuffer(char[] a)
+
+    string hash(string a)
+    bool verify(string a, string b)
 
     string body()
     void header(string a)
@@ -544,6 +548,41 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                     let result = unsafe { String::from_utf8_unchecked(result) };
                     caller.data_mut().output.push_str(&result);
 
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module.imports().find(|func| func.name() == "hash") {
+        linker
+            .func_new(
+                "env",
+                "hash",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, params, results| {
+                    let password = val_to_string(&mut caller, params.get(0).unwrap());
+                    let result = hash(password, DEFAULT_COST).unwrap();
+
+                    results[0] = string_to_val(&mut caller, &result);
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module.imports().find(|func| func.name() == "verify") {
+        linker
+            .func_new(
+                "env",
+                "verify",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, params, results| {
+                    let password = val_to_string(&mut caller, params.get(0).unwrap());
+                    let hash = val_to_string(&mut caller, params.get(1).unwrap());
+                    let result = verify(password, &hash).unwrap();
+
+                    results[0] = Val::I32(result.into());
                     Ok(())
                 },
             )

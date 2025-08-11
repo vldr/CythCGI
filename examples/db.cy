@@ -1,5 +1,13 @@
 <?
 
+string p = hash("admin")
+println(p)
+
+bool ii = verify("admin", p)
+
+println("" + ii)
+
+
 Database connection = Database(":memory:")
 bool result = connection.execute("
   CREATE TABLE IF NOT EXISTS users (name TEXT, age INTEGER);
