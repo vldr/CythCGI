@@ -45,9 +45,10 @@ const IMPORTS: &str = "import \"env\"
     void printBuffer(char[] a)
 
     string body()
-    void header(string value)
+    void header(string a)
+    string cookie(string a)
 
-    string getEnviron(string key)
+    string getEnviron(string a)
     string[] getEnvirons()
 
     string date(int a, string b)
@@ -577,6 +578,42 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                     let header = val_to_string(&mut caller, params.get(0).unwrap());
                     caller.data_mut().headers.push_str(header.trim());
                     caller.data_mut().headers.push('\n');
+
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module.imports().find(|func| func.name() == "cookie") {
+        linker
+            .func_new(
+                "env",
+                "cookie",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, params, results| {
+                    let name = val_to_string(&mut caller, params.get(0).unwrap());
+                    let cookie = caller.data().environs.get("HTTP_COOKIE");
+
+                    if let Some(cookie) = cookie
+                        && let Some(mut start) = cookie.find(&(name.clone() + "="))
+                    {
+                        start += name.len() + 1;
+
+                        let mut end = start;
+                        while end < cookie.len() {
+                            if cookie.as_bytes()[end] == b';' {
+                                break;
+                            }
+
+                            end += 1;
+                        }
+
+                        let result = &cookie[start..end].trim().to_owned();
+                        results[0] = string_to_val(&mut caller, result);
+                    } else {
+                        results[0] = string_to_val(&mut caller, &"".to_owned());
+                    }
 
                     Ok(())
                 },
