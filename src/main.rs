@@ -20,6 +20,7 @@ use regex::Regex;
 use dashmap::DashMap;
 use fastcgi::Request;
 use sqlite::{Connection, ConnectionThreadSafe, State, Statement, Value};
+use uuid::Uuid;
 use wasmtime::{
     AnyRef, ArrayRef, ArrayRefPre, ArrayType, AsContext, AsContextMut, Caller, Config, Engine,
     ExternRef, FieldType, HeapType, InstanceAllocationStrategy, InstancePre, Linker, Module,
@@ -51,6 +52,7 @@ const IMPORTS: &str = "import \"env\"
     string body()
     void header(string a)
     string cookie(string a)
+    string uuid()
 
     string getEnviron(string a)
     string[] getEnvirons()
@@ -632,11 +634,14 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, results| {
                     let name = val_to_string(&mut caller, params.get(0).unwrap());
-                    let cookie = caller.data().environs.get("HTTP_COOKIE");
+                    let empty_string = "".to_owned();
+                    let cookie = caller
+                        .data()
+                        .environs
+                        .get("HTTP_COOKIE")
+                        .unwrap_or(&empty_string);
 
-                    if let Some(cookie) = cookie
-                        && let Some(mut start) = cookie.find(&(name.clone() + "="))
-                    {
+                    if let Some(mut start) = cookie.find(&(name.clone() + "=")) {
                         start += name.len() + 1;
 
                         let mut end = start;
@@ -651,8 +656,24 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                         let result = &cookie[start..end].trim().to_owned();
                         results[0] = string_to_val(&mut caller, result);
                     } else {
-                        results[0] = string_to_val(&mut caller, &"".to_owned());
+                        results[0] = string_to_val(&mut caller, &empty_string);
                     }
+
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module.imports().find(|func| func.name() == "uuid") {
+        linker
+            .func_new(
+                "env",
+                "uuid",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, _params, results| {
+                    let uuid = Uuid::new_v4();
+                    results[0] = string_to_val(&mut caller, &uuid.as_hyphenated().to_string());
 
                     Ok(())
                 },

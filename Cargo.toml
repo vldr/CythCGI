@@ -11,6 +11,8 @@ wasmtime = "35.0.0"
 sqlite = { path = "vendor/sqlite" }
 fastcgi = { path = "vendor/fastcgi" }
 bcrypt = "0.17.0"
+uuid = { version = "1.18.0", features = ["v4"] }
+
 
 [profile.release]
 lto = "fat"

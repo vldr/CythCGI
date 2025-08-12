@@ -1,11 +1,8 @@
 <?
 
-string p = hash("admin")
-println(p)
+println(uuid())
 
-bool ii = verify("admin", p)
 
-println("" + ii)
 
 
 Database connection = Database(":memory:")
