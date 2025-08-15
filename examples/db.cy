@@ -1,6 +1,6 @@
 <?
-Map<string, string> query = parseQuery("a=b&b=c&something_else=another-thing&notright#&blank=&ignoreme!")
-println(query["blank"])
+Map<string, string> queries = parseQuery("a=b&b=c&something_else=Computer%25252525252BGraphics%2525252525252C%25252525252BRaytracing&notright#&blank=&ignoreme!")
+println(markdown("# hi") + query())
 
 
 println(uuid())

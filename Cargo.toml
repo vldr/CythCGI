@@ -12,6 +12,8 @@ sqlite = { path = "vendor/sqlite" }
 fastcgi = { path = "vendor/fastcgi" }
 bcrypt = "0.17.0"
 uuid = { version = "1.18.0", features = ["v4"] }
+markdown = "1.0.0"
+percent-encoding = "2.3.1"
 
 
 [profile.release]

@@ -15,6 +15,7 @@ use std::{
 
 use bcrypt::{DEFAULT_COST, hash, verify};
 use chrono::{DateTime, Local};
+use percent_encoding::NON_ALPHANUMERIC;
 use regex::Regex;
 
 use dashmap::DashMap;
@@ -46,10 +47,16 @@ const IMPORTS: &str = "import \"env\"
     void println(string a)
     void printBuffer(char[] a)
 
+    string urlEncode(string a)
+    string urlDecode(string a)
+    string markdown(string a)
+
     string hash(string a)
     bool verify(string a, string b)
 
     string body()
+    string query()
+
     void header(string a)
     string cookie(string a)
     string uuid()
@@ -144,7 +151,7 @@ Map<string, string> parseQuery(string query)
         string[] parts = stringSplit(pair, '=')
 
         if parts.length == 2
-            result.insert(parts[0], parts[1])
+            result.insert(parts[0], urlDecode(parts[1]))
 
     return result
 
@@ -704,6 +711,84 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                     let body = string_to_val(&mut caller, &input);
 
                     caller.data_mut().input = input;
+                    results[0] = body;
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module.imports().find(|func| func.name() == "urlEncode") {
+        linker
+            .func_new(
+                "env",
+                "urlEncode",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, params, results| {
+                    let input = val_to_string(&mut caller, params.get(0).unwrap());
+                    let output =
+                        percent_encoding::utf8_percent_encode(&input, NON_ALPHANUMERIC).to_string();
+
+                    results[0] = string_to_val(&mut caller, &output);
+
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module.imports().find(|func| func.name() == "urlDecode") {
+        linker
+            .func_new(
+                "env",
+                "urlDecode",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, params, results| {
+                    let input = val_to_string(&mut caller, params.get(0).unwrap());
+                    let output = percent_encoding::percent_decode_str(&input)
+                        .decode_utf8()
+                        .unwrap_or("".into())
+                        .into_owned()
+                        .replace("+", " ");
+
+                    results[0] = string_to_val(&mut caller, &output);
+
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module.imports().find(|func| func.name() == "markdown") {
+        linker
+            .func_new(
+                "env",
+                "markdown",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, params, results| {
+                    let input = val_to_string(&mut caller, params.get(0).unwrap());
+                    let output = markdown::to_html(&input);
+
+                    results[0] = string_to_val(&mut caller, &output);
+
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module.imports().find(|func| func.name() == "query") {
+        linker
+            .func_new(
+                "env",
+                "query",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, _params, results| {
+                    let environs = caller.data().environs.clone();
+                    let default = String::new();
+                    let value = environs.get("QUERY_STRING").unwrap_or(&default);
+                    let body = string_to_val(&mut caller, &value);
+
                     results[0] = body;
                     Ok(())
                 },
