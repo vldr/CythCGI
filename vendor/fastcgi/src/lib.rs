@@ -667,6 +667,17 @@ where
         Err(e) => Err(e).unwrap(),
     };
     let handler = Arc::new(handler);
+
+    for _ in 0..num_cpus::get() - 1 {
+        match fork::fork() {
+            Ok(fork::Fork::Parent(child)) => {
+                break;
+            }
+            Ok(fork::Fork::Child) => println!("I'm a new child process"),
+            Err(_) => println!("Fork failed"),
+        }
+    }
+
     loop {
         let sock = match transport.accept() {
             Ok(sock) => sock,

@@ -1478,6 +1478,7 @@ fn main() -> ExitCode {
     config.collector(wasmtime::Collector::Null);
     config.wasm_reference_types(true);
     config.wasm_function_references(true);
+    config.macos_use_mach_ports(false);
     config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
 
     let engine = Engine::new(&config).unwrap();
