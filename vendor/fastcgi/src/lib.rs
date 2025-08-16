@@ -681,16 +681,14 @@ where
         };
         if allow {
             let handler = handler.clone();
-            thread::spawn(move || {
-                let sock = Rc::new(sock);
-                loop {
-                    let (request_id, role, keep_conn) = Request::begin(&sock).unwrap();
-                    handler(Request::new(sock.clone(), request_id, role).unwrap());
-                    if !keep_conn {
-                        break;
-                    }
+            let sock = Rc::new(sock);
+            loop {
+                let (request_id, role, keep_conn) = Request::begin(&sock).unwrap();
+                handler(Request::new(sock.clone(), request_id, role).unwrap());
+                if !keep_conn {
+                    break;
                 }
-            });
+            }
         }
     }
 }
