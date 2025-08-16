@@ -657,45 +657,50 @@ impl Drop for Request {
     }
 }
 
-fn run_transport<F>(handler: F, transport: &mut Transport)
+fn run_transport<F>(handler: F, transport: Transport)
 where
     F: Fn(Request) + Send + Sync + 'static,
 {
-    let addrs: Option<HashSet<String>> = match std::env::var("FCGI_WEB_SERVER_ADDRS") {
-        Ok(value) => Some(value.split(',').map(|s| s.to_owned()).collect()),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(e) => Err(e).unwrap(),
-    };
     let handler = Arc::new(handler);
 
-    for _ in 0..num_cpus::get() - 1 {
-        match fork::fork() {
-            Ok(fork::Fork::Parent(child)) => {
-                break;
+    for i in 0..num_cpus::get() {
+        let handler = handler.clone();
+        let thread = thread::spawn(move || {
+            println!("Starting thread {}", i);
+
+            let addrs: Option<HashSet<String>> = match std::env::var("FCGI_WEB_SERVER_ADDRS") {
+                Ok(value) => Some(value.split(',').map(|s| s.to_owned()).collect()),
+                Err(std::env::VarError::NotPresent) => None,
+                Err(e) => Err(e).unwrap(),
+            };
+
+            loop {
+                let sock = match transport.accept() {
+                    Ok(sock) => sock,
+                    Err(e) => {
+                        println!("Failed to accept socket: {}", e.to_string());
+                        continue;
+                    }
+                };
+
+                let allow = match addrs {
+                    Some(ref addrs) => match sock.peer() {
+                        Ok(ref addr) => addrs.contains(addr),
+                        Err(_) => false,
+                    },
+                    None => true,
+                };
+
+                if allow {
+                    let sock = Rc::new(sock);
+                    let (request_id, role, keep_conn) = Request::begin(&sock).unwrap();
+                    handler(Request::new(sock.clone(), request_id, role).unwrap());
+                }
             }
-            Ok(fork::Fork::Child) => println!("I'm a new child process"),
-            Err(_) => println!("Fork failed"),
-        }
-    }
+        });
 
-    loop {
-        let sock = match transport.accept() {
-            Ok(sock) => sock,
-            Err(e) => panic!(e.to_string()),
-        };
-        let allow = match addrs {
-            Some(ref addrs) => match sock.peer() {
-                Ok(ref addr) => addrs.contains(addr),
-                Err(_) => false,
-            },
-            None => true,
-        };
-
-        if allow {
-            let handler = handler.clone();
-            let sock = Rc::new(sock);
-            let (request_id, role, keep_conn) = Request::begin(&sock).unwrap();
-            handler(Request::new(sock.clone(), request_id, role).unwrap());
+        if i == num_cpus::get() - 1 {
+            thread.join();
         }
     }
 }
@@ -708,7 +713,7 @@ pub fn run<F>(handler: F)
 where
     F: Fn(Request) + Send + Sync + 'static,
 {
-    run_transport(handler, &mut Transport::new())
+    run_transport(handler, Transport::new())
 }
 
 #[cfg(unix)]
@@ -720,7 +725,7 @@ pub fn run_raw<F>(handler: F, raw_fd: std::os::unix::io::RawFd)
 where
     F: Fn(Request) + Send + Sync + 'static,
 {
-    run_transport(handler, &mut Transport::from_raw_fd(raw_fd))
+    run_transport(handler, Transport::from_raw_fd(raw_fd))
 }
 
 #[cfg(unix)]
@@ -730,7 +735,7 @@ where
     F: Fn(Request) + Send + Sync + 'static,
 {
     use std::os::unix::io::AsRawFd;
-    run_transport(handler, &mut Transport::from_raw_fd(listener.as_raw_fd()))
+    run_transport(handler, Transport::from_raw_fd(listener.as_raw_fd()))
 }
 
 #[cfg(windows)]
@@ -739,5 +744,5 @@ pub fn run_tcp<F>(handler: F, listener: &TcpListener)
 where
     F: Fn(Request) + Send + Sync + 'static,
 {
-    run_transport(handler, &mut Transport::from_tcp(&listener))
+    run_transport(handler, Transport::from_tcp(&listener))
 }

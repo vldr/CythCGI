@@ -31,6 +31,7 @@ use std::os::unix::io::RawFd;
 
 const LISTENSOCK_FILENO: c::c_int = 0;
 
+#[derive(Clone, Copy)]
 pub struct Transport {
     inner: c::c_int,
 }
@@ -44,7 +45,7 @@ impl Transport {
         Transport { inner: raw_fd }
     }
 
-    pub fn accept(&mut self) -> io::Result<Socket> {
+    pub fn accept(&self) -> io::Result<Socket> {
         let res = unsafe { c::accept(self.inner, 0 as *mut _, 0 as *mut _) };
         if res == -1 {
             Err(io::Error::last_os_error())
