@@ -15,6 +15,7 @@ use std::{
 
 use bcrypt::{DEFAULT_COST, hash, verify};
 use chrono::{DateTime, Local};
+use markdown::{CompileOptions, Options};
 use percent_encoding::NON_ALPHANUMERIC;
 use regex::Regex;
 
@@ -247,7 +248,7 @@ class Map<K, V>
     int size
 
     void __init__()
-        bucketCount = 16
+        bucketCount = 64
         size = 0
 
         for int i = 0; i < bucketCount; i += 1
@@ -268,6 +269,21 @@ class Map<K, V>
         return hash
 
     void insert(K key, V value)
+        void resize()
+            Entry<K, V>[] oldBuckets = buckets
+            bucketCount = bucketCount * 2
+            size = 0
+
+            for int i = 0; i < bucketCount; i += 1
+                buckets.push(null)
+
+            for int i = 0; i < oldBuckets.length; i += 1
+                Entry<K, V> current = oldBuckets[i]
+                while current != null
+                    Entry<K, V> nextEntry = current.next
+                    insert(current.key, current.value)
+                    current = nextEntry
+
         int index = hash(key)
         Entry<K, V> head = buckets[index]
         Entry<K, V> current = head
@@ -286,6 +302,18 @@ class Map<K, V>
         float threshold = 0.75
         if size > bucketCount * threshold
             resize()
+
+    bool contains(K key)
+        int index = hash(key)
+        Entry<K, V> current = buckets[index]
+
+        while current != null
+            if current.key == key
+                return true
+
+            current = current.next
+
+        return false
 
     V get(K key)
         int index = hash(key)
@@ -317,21 +345,6 @@ class Map<K, V>
         
             prev = current
             current = current.next
-
-    void resize()
-        Entry<K, V>[] oldBuckets = buckets
-        bucketCount = bucketCount * 2
-        size = 0
-
-        for int i = 0; i < bucketCount; i += 1
-            buckets.push(null)
-
-        for int i = 0; i < oldBuckets.length; i += 1
-            Entry<K, V> current = oldBuckets[i]
-            while current != null
-                Entry<K, V> nextEntry = current.next
-                insert(current.key, current.value)
-                current = nextEntry
 ";
 
 fn string_array_to_val(caller: &mut Caller<'_, Context>, buf: &Vec<&String>) -> Val {
@@ -395,7 +408,7 @@ fn val_to_char_array(caller: &mut Caller<'_, Context>, val: &Val) -> Vec<u8> {
         .unwrap()
         .take(size as usize)
     {
-        result.push(elem.i32().unwrap() as u8);
+        result.push(elem.unwrap_i32() as u8);
     }
 
     result
@@ -441,13 +454,12 @@ fn val_to_string(caller: &mut Caller<'_, Context>, val: &Val) -> String {
     let array = val.unwrap_any_ref().unwrap();
     let array = array.as_array(caller.as_context()).unwrap().unwrap();
 
-    let mut result = String::with_capacity(array.len(caller.as_context()).unwrap() as usize);
+    let mut result = Vec::with_capacity(array.len(caller.as_context()).unwrap() as usize);
     for elem in array.elems(caller.as_context_mut()).unwrap() {
-        let ch = std::char::from_u32(elem.i32().unwrap() as u32).unwrap();
-        result.push(ch);
+        result.push(elem.unwrap_i32() as u8);
     }
 
-    result
+    unsafe { String::from_utf8_unchecked(result) }
 }
 
 fn val_to_externref<'a, T: 'static>(
@@ -466,7 +478,7 @@ fn val_to_externref<'a, T: 'static>(
     data
 }
 
-fn string_to_val(caller: &mut Caller<'_, Context>, string: &String) -> Val {
+fn string_to_val(caller: &mut Caller<'_, Context>, string: &str) -> Val {
     let array_ty = ArrayType::new(
         caller.engine(),
         FieldType::new(Mutability::Var, StorageType::I8),
@@ -767,7 +779,17 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, results| {
                     let input = val_to_string(&mut caller, params.get(0).unwrap());
-                    let output = markdown::to_html(&input);
+                    let output = markdown::to_html_with_options(
+                        &input,
+                        &Options {
+                            compile: CompileOptions {
+                                allow_dangerous_html: true,
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap_or("".to_owned());
 
                     results[0] = string_to_val(&mut caller, &output);
 
@@ -875,7 +897,7 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 "date",
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, results| {
-                    let epoch = params.get(0).unwrap().i32().unwrap();
+                    let epoch = params.get(0).unwrap().unwrap_i32();
                     let format = val_to_string(&mut caller, params.get(1).unwrap());
 
                     let datetime =
