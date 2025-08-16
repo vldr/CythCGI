@@ -679,16 +679,12 @@ where
             },
             None => true,
         };
+
         if allow {
             let handler = handler.clone();
             let sock = Rc::new(sock);
-            loop {
-                let (request_id, role, keep_conn) = Request::begin(&sock).unwrap();
-                handler(Request::new(sock.clone(), request_id, role).unwrap());
-                if !keep_conn {
-                    break;
-                }
-            }
+            let (request_id, role, keep_conn) = Request::begin(&sock).unwrap();
+            handler(Request::new(sock.clone(), request_id, role).unwrap());
         }
     }
 }
