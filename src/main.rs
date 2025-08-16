@@ -26,8 +26,7 @@ use uuid::Uuid;
 use wasmtime::{
     AnyRef, ArrayRef, ArrayRefPre, ArrayType, AsContext, AsContextMut, Caller, Config, Engine,
     ExternRef, FieldType, HeapType, InstanceAllocationStrategy, InstancePre, Linker, Module,
-    Mutability, PoolingAllocationConfig, RefType, StorageType, Store, StructRef, StructRefPre,
-    StructType, Val, ValType,
+    Mutability, RefType, StorageType, Store, StructRef, StructRefPre, StructType, Val, ValType,
 };
 
 struct Script {
