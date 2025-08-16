@@ -10,7 +10,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     process::{Command, ExitCode, Stdio},
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use bcrypt::{DEFAULT_COST, hash, verify};
@@ -1318,6 +1318,7 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
 }
 
 fn run_script(req: &mut Request, engine: &Engine, instance_pre: &InstancePre<Context>) {
+    let instant = Instant::now();
     let environs = req.params();
     let headers = String::new();
     let output = String::new();
@@ -1349,7 +1350,8 @@ fn run_script(req: &mut Request, engine: &Engine, instance_pre: &InstancePre<Con
 
     write!(
         &mut req.stdout(),
-        "{}\n{}",
+        "Interval: {:?}\n{}\n{}",
+        instant.elapsed(),
         store.data().headers,
         store.data().output
     )
