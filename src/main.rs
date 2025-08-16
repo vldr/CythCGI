@@ -1469,17 +1469,13 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let mut pool = PoolingAllocationConfig::new();
-    pool.total_gc_heaps(1000);
-    pool.total_core_instances(1000);
-
     let mut config = Config::new();
     config.wasm_gc(true);
     config.collector(wasmtime::Collector::Null);
     config.wasm_reference_types(true);
     config.wasm_function_references(true);
     config.macos_use_mach_ports(false);
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+    config.allocation_strategy(InstanceAllocationStrategy::OnDemand);
 
     let engine = Engine::new(&config).unwrap();
     let scripts = DashMap::<String, Script>::new();

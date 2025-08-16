@@ -661,7 +661,7 @@ fn run_transport<F>(handler: F, transport: &mut Transport)
 where
     F: Fn(Request) + Send + Sync + 'static,
 {
-    let pool = threadpool::ThreadPool::new(num_cpus::get());
+    let pool = threadpool::ThreadPool::new(num_cpus::get_physical());
     let addrs: Option<HashSet<String>> = match std::env::var("FCGI_WEB_SERVER_ADDRS") {
         Ok(value) => Some(value.split(',').map(|s| s.to_owned()).collect()),
         Err(std::env::VarError::NotPresent) => None,
