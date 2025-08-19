@@ -661,7 +661,7 @@ fn run_transport<F>(mut handler: F, transport: &mut Transport)
 where
     F: FnMut(Request),
 {
-    for _ in 0..0 {
+    for _ in 0..num_cpus::get() - 1 {
         match fork::fork() {
             Ok(fork::Fork::Parent(child)) => {
                 break;
