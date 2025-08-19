@@ -4,6 +4,7 @@ use std::{
     cmp,
     collections::HashMap,
     env::{self, args},
+    ffi::c_void,
     fs,
     io::{Read, Write},
     net::TcpListener,
@@ -19,11 +20,9 @@ use markdown::{CompileOptions, Options};
 use percent_encoding::NON_ALPHANUMERIC;
 use regex::Regex;
 
-use dashmap::DashMap;
 use fastcgi::Request;
 use sqlite::{Connection, ConnectionThreadSafe, State, Statement, Value};
 use uuid::Uuid;
-use v8::Handle;
 
 struct Script<'a> {
     modified: SystemTime,
@@ -36,18 +35,15 @@ struct Context {
     output: String,
     headers: String,
     environs: Arc<HashMap<String, String>>,
-    at: v8::Global<v8::Function>,
-    length: v8::Global<v8::Function>,
+    backing: v8::SharedRef<v8::BackingStore>,
+    externals: Vec<*mut c_void>,
+    to_string: v8::Global<v8::Function>,
+    from_string: v8::Global<v8::Function>,
 }
 
 const IMPORTS: &str = "import \"env\"
-    void print(string n)
-";
-
-const IMPORTSs: &str = "import \"env\"
     void print(string a)
     void println(string a)
-    void printBuffer(char[] a)
 
     string urlEncode(string a)
     string urlDecode(string a)
@@ -64,7 +60,6 @@ const IMPORTSs: &str = "import \"env\"
     string uuid()
 
     string getEnviron(string a)
-    string[] getEnvirons()
 
     string date(int a, string b)
     int now()
@@ -77,6 +72,21 @@ const IMPORTSs: &str = "import \"env\"
     bool sqliteNext(any a)
     bool sqliteReadNull(any a, string b)
     T sqliteRead<T>(any a, string b)
+
+string toString(int length)
+    char[] buffer
+    buffer.reserve(length)
+
+    for int i = 0; i < length; i += 1
+        buffer[i] = readChar(i)
+
+    return buffer.toString()
+
+int fromString(string n)
+    for char c in n
+        writeChar(it, c)
+
+    return n.length
 
 int stringIndexOf(string s, string target)
     if target.length == 0
@@ -348,154 +358,63 @@ class Map<K, V>
             current = current.next
 ";
 
-// fn string_array_to_val(caller: &mut Caller<'_, Context>, buf: &Vec<&String>) -> Val {
-//     let string_ty = ArrayType::new(
-//         caller.engine(),
-//         FieldType::new(Mutability::Var, StorageType::I8),
-//     );
-//     let string_ref_ty = RefType::new(false, HeapType::ConcreteArray(string_ty.clone()));
+fn val_to_string(scope: &mut v8::HandleScope, arg: v8::Local<'_, v8::Value>) -> String {
+    let context: &Context = scope.get_slot().unwrap();
+    let data = context.backing.data().unwrap();
 
-//     let array_ty = ArrayType::new(
-//         caller.engine(),
-//         FieldType::new(Mutability::Var, ValType::Ref(string_ref_ty.clone()).into()),
-//     );
-//     let array_ref_ty = RefType::new(true, HeapType::ConcreteArray(array_ty.clone()));
+    let from_string = context.from_string.clone();
+    let from_string = v8::Local::new(scope, from_string)
+        .call(scope, arg, &[arg])
+        .unwrap()
+        .int32_value(scope)
+        .unwrap();
 
-//     let struct_ty = StructType::new(
-//         caller.engine(),
-//         [
-//             FieldType::new(Mutability::Var, ValType::Ref(array_ref_ty).into()),
-//             FieldType::new(Mutability::Var, ValType::I32.into()),
-//         ],
-//     )
-//     .unwrap();
+    let length = from_string as usize;
 
-//     let struct_allocator = StructRefPre::new(caller.as_context_mut(), struct_ty);
-//     let array_allocator = ArrayRefPre::new(caller.as_context_mut(), array_ty);
+    let ptr = data.as_ptr() as *const u8;
+    let slice = unsafe { std::slice::from_raw_parts(ptr, length) };
 
-//     let list_len = buf.len();
-//     let mut list = Vec::<Val>::with_capacity(list_len);
+    unsafe { std::str::from_utf8_unchecked(slice).to_owned() }
+}
 
-//     for string in buf {
-//         list.push(string_to_val(caller, &string));
-//     }
+fn string_to_val<'a>(scope: &mut v8::HandleScope<'a>, arg: &str) -> v8::Local<'a, v8::Value> {
+    let context: &Context = scope.get_slot().unwrap();
+    let data = context.backing.data().unwrap();
 
-//     let array = ArrayRef::new_fixed(caller.as_context_mut(), &array_allocator, &list).unwrap();
-//     let class = StructRef::new(
-//         caller.as_context_mut(),
-//         &struct_allocator,
-//         &[array.into(), Val::I32(list_len as i32)],
-//     )
-//     .unwrap();
+    unsafe {
+        let dst_ptr = data.as_ptr() as *mut u8;
+        let src_ptr = arg.as_ptr();
+        std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, arg.len());
+    }
 
-//     Val::AnyRef(Some(class.to_anyref()))
-// }
+    let to_string = context.to_string.clone();
+    let length = v8::Integer::new(scope, arg.len() as i32).into();
+    let undefined = v8::undefined(scope).into();
+    let to_string: v8::Local<'a, v8::Value> = v8::Local::new(scope, to_string)
+        .call(scope, undefined, &[length])
+        .unwrap();
 
-// fn val_to_char_array(caller: &mut Caller<'_, Context>, val: &Val) -> Vec<u8> {
-//     let class = val.unwrap_any_ref().unwrap();
-//     let class = class.unwrap_struct(caller.as_context()).unwrap();
+    to_string
+}
 
-//     let size = class.field(caller.as_context_mut(), 1).unwrap();
-//     let size = size.unwrap_i32();
+pub fn extern_to_val<'s, T>(scope: &mut v8::HandleScope<'s>, val: T) -> v8::Local<'s, v8::Value> {
+    let context: &mut Context = scope.get_slot_mut().unwrap();
+    let raw: *mut T = Box::into_raw(Box::new(val));
+    context.externals.push(raw as *mut c_void);
 
-//     let array = class.field(caller.as_context_mut(), 0).unwrap();
-//     let array = array.unwrap_any_ref().unwrap();
-//     let array = array.as_array(caller.as_context()).unwrap().unwrap();
+    println!("{:?}", raw);
 
-//     let mut result = Vec::with_capacity(size as usize);
+    let external = v8::External::new(scope, raw as *mut c_void);
 
-//     for elem in array
-//         .elems(caller.as_context_mut())
-//         .unwrap()
-//         .take(size as usize)
-//     {
-//         result.push(elem.unwrap_i32() as u8);
-//     }
+    external.into()
+}
 
-//     result
-// }
+pub fn val_to_extern<'s, T>(val: v8::Local<'s, v8::Value>) -> &'s mut T {
+    let external = val.cast::<v8::External>();
+    println!("a {:?}", external.value());
 
-// fn char_array_to_val(caller: &mut Caller<'_, Context>, buf: Vec<u8>) -> Val {
-//     let array_ty = ArrayType::new(
-//         caller.engine(),
-//         FieldType::new(Mutability::Var, StorageType::I8),
-//     );
-
-//     let array_ref_ty = RefType::new(true, HeapType::ConcreteArray(array_ty.clone()));
-
-//     let struct_ty = StructType::new(
-//         caller.engine(),
-//         [
-//             FieldType::new(Mutability::Var, ValType::Ref(array_ref_ty).into()),
-//             FieldType::new(Mutability::Var, ValType::I32.into()),
-//         ],
-//     )
-//     .unwrap();
-
-//     let struct_allocator = StructRefPre::new(caller.as_context_mut(), struct_ty);
-//     let array_allocator = ArrayRefPre::new(caller.as_context_mut(), array_ty);
-
-//     let mut list = Vec::<Val>::with_capacity(buf.len());
-//     for byte in &buf {
-//         list.push(Val::I32(*byte as i32));
-//     }
-
-//     let array = ArrayRef::new_fixed(caller.as_context_mut(), &array_allocator, &list).unwrap();
-//     let class = StructRef::new(
-//         caller.as_context_mut(),
-//         &struct_allocator,
-//         &[array.into(), Val::I32(buf.len() as i32)],
-//     )
-//     .unwrap();
-
-//     Val::AnyRef(Some(class.to_anyref()))
-// }
-
-// fn val_to_string(caller: &mut Caller<'_, Context>, val: &Val) -> String {
-//     let array = val.unwrap_any_ref().unwrap();
-//     let array = array.as_array(caller.as_context()).unwrap().unwrap();
-
-//     let mut result = Vec::with_capacity(array.len(caller.as_context()).unwrap() as usize);
-//     for elem in array.elems(caller.as_context_mut()).unwrap() {
-//         result.push(elem.unwrap_i32() as u8);
-//     }
-
-//     unsafe { String::from_utf8_unchecked(result) }
-// }
-
-// fn val_to_externref<'a, T: 'static>(
-//     caller: &'a mut Caller<'_, Context>,
-//     val: &'a Val,
-// ) -> &'a mut T {
-//     let any_ref = val.unwrap_any_ref().unwrap();
-//     let extern_ref = ExternRef::convert_any(caller.as_context_mut(), *any_ref).unwrap();
-//     let data = extern_ref
-//         .data_mut(caller.as_context_mut())
-//         .unwrap()
-//         .unwrap();
-
-//     let data = data.downcast_mut::<T>().unwrap();
-
-//     data
-// }
-
-// fn string_to_val(caller: &mut Caller<'_, Context>, string: &str) -> Val {
-//     let array_ty = ArrayType::new(
-//         caller.engine(),
-//         FieldType::new(Mutability::Var, StorageType::I8),
-//     );
-
-//     let allocator = ArrayRefPre::new(caller.as_context_mut(), array_ty);
-
-//     let mut list = Vec::<Val>::with_capacity(string.len());
-//     for byte in string.as_bytes() {
-//         list.push(Val::I32(*byte as i32));
-//     }
-
-//     let array = ArrayRef::new_fixed(caller.as_context_mut(), &allocator, &list).unwrap();
-
-//     Val::AnyRef(Some(array.to_anyref()))
-// }
+    unsafe { &mut *(external.value() as *mut T) }
+}
 
 fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
     fn dedent(
@@ -625,699 +544,540 @@ fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
     (output, mapping)
 }
 
-// fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
-//     let mut linker = Linker::<Context>::new(engine);
-
-//     if let Some(func_ty) = module.imports().find(|func| func.name() == "print") {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "print",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 |mut caller, params, _results| {
-//                     let result = val_to_string(&mut caller, params.get(0).unwrap());
-//                     caller.data_mut().output.push_str(&result);
-
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module.imports().find(|func| func.name() == "println") {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "println",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 |mut caller, params, _results| {
-//                     let result = val_to_string(&mut caller, params.get(0).unwrap());
-//                     caller.data_mut().output.push_str(&result);
-//                     caller.data_mut().output.push('\n');
-
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module.imports().find(|func| func.name() == "printBuffer") {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "printBuffer",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 |mut caller, params, _results| {
-//                     let result = val_to_char_array(&mut caller, params.get(0).unwrap());
-//                     let result = unsafe { String::from_utf8_unchecked(result) };
-//                     caller.data_mut().output.push_str(&result);
-
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module.imports().find(|func| func.name() == "hash") {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "hash",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller, params, results| {
-//                     let password = val_to_string(&mut caller, params.get(0).unwrap());
-//                     let result = hash(password, DEFAULT_COST).unwrap();
-
-//                     results[0] = string_to_val(&mut caller, &result);
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module.imports().find(|func| func.name() == "verify") {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "verify",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller, params, results| {
-//                     let password = val_to_string(&mut caller, params.get(0).unwrap());
-//                     let hash = val_to_string(&mut caller, params.get(1).unwrap());
-//                     let result = verify(password, &hash).unwrap();
-
-//                     results[0] = Val::I32(result.into());
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module.imports().find(|func| func.name() == "body") {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "body",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller, _params, results| {
-//                     let input = std::mem::take(&mut caller.data_mut().input);
-//                     let body = string_to_val(&mut caller, &input);
-
-//                     caller.data_mut().input = input;
-//                     results[0] = body;
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module.imports().find(|func| func.name() == "urlEncode") {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "urlEncode",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller, params, results| {
-//                     let input = val_to_string(&mut caller, params.get(0).unwrap());
-//                     let output =
-//                         percent_encoding::utf8_percent_encode(&input, NON_ALPHANUMERIC).to_string();
-
-//                     results[0] = string_to_val(&mut caller, &output);
-
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module.imports().find(|func| func.name() == "urlDecode") {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "urlDecode",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller, params, results| {
-//                     let input = val_to_string(&mut caller, params.get(0).unwrap());
-//                     let output = percent_encoding::percent_decode_str(&input)
-//                         .decode_utf8()
-//                         .unwrap_or("".into())
-//                         .into_owned()
-//                         .replace("+", " ");
-
-//                     results[0] = string_to_val(&mut caller, &output);
-
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module.imports().find(|func| func.name() == "markdown") {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "markdown",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller, params, results| {
-//                     let input = val_to_string(&mut caller, params.get(0).unwrap());
-//                     let output = markdown::to_html_with_options(
-//                         &input,
-//                         &Options {
-//                             compile: CompileOptions {
-//                                 allow_dangerous_html: true,
-//                                 ..Default::default()
-//                             },
-//                             ..Default::default()
-//                         },
-//                     )
-//                     .unwrap_or("".to_owned());
-
-//                     results[0] = string_to_val(&mut caller, &output);
-
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module.imports().find(|func| func.name() == "query") {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "query",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller, _params, results| {
-//                     let environs = caller.data().environs.clone();
-//                     let default = String::new();
-//                     let value = environs.get("QUERY_STRING").unwrap_or(&default);
-//                     let body = string_to_val(&mut caller, &value);
-
-//                     results[0] = body;
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module.imports().find(|func| func.name() == "header") {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "header",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller, params, _results| {
-//                     let header = val_to_string(&mut caller, params.get(0).unwrap());
-//                     caller.data_mut().headers.push_str(header.trim());
-//                     caller.data_mut().headers.push('\n');
-
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module.imports().find(|func| func.name() == "cookie") {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "cookie",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller, params, results| {
-//                     let name = val_to_string(&mut caller, params.get(0).unwrap());
-//                     let empty_string = "".to_owned();
-//                     let cookie = caller
-//                         .data()
-//                         .environs
-//                         .get("HTTP_COOKIE")
-//                         .unwrap_or(&empty_string);
-
-//                     if let Some(mut start) = cookie.find(&(name.clone() + "=")) {
-//                         start += name.len() + 1;
-
-//                         let mut end = start;
-//                         while end < cookie.len() {
-//                             if cookie.as_bytes()[end] == b';' {
-//                                 break;
-//                             }
-
-//                             end += 1;
-//                         }
-
-//                         let result = &cookie[start..end].trim().to_owned();
-//                         results[0] = string_to_val(&mut caller, result);
-//                     } else {
-//                         results[0] = string_to_val(&mut caller, &empty_string);
-//                     }
-
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module.imports().find(|func| func.name() == "uuid") {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "uuid",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller, _params, results| {
-//                     let uuid = Uuid::new_v4();
-//                     results[0] = string_to_val(&mut caller, &uuid.as_hyphenated().to_string());
-
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module.imports().find(|func| func.name() == "date") {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "date",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller, params, results| {
-//                     let epoch = params.get(0).unwrap().unwrap_i32();
-//                     let format = val_to_string(&mut caller, params.get(1).unwrap());
-
-//                     let datetime =
-//                         DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs(epoch as u64));
-//                     let result = datetime.format(&format).to_string();
-
-//                     results[0] = string_to_val(&mut caller, &result);
-
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module.imports().find(|func| func.name() == "now") {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "now",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut _caller, _params, results| {
-//                     results[0] = Val::I32(
-//                         SystemTime::now()
-//                             .duration_since(UNIX_EPOCH)
-//                             .unwrap()
-//                             .as_secs() as i32,
-//                     );
-
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module.imports().find(|func| func.name() == "getEnviron") {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "getEnviron",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller, params, results| {
-//                     let environs = caller.data().environs.clone();
-//                     let key = val_to_string(&mut caller, params.get(0).unwrap());
-//                     let default = String::new();
-//                     let value = environs.get(&key).unwrap_or(&default);
-
-//                     results[0] = string_to_val(&mut caller, &value);
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module.imports().find(|func| func.name() == "getEnvirons") {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "getEnvirons",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller, _params, results| {
-//                     let environs = caller.data().environs.clone();
-//                     let list: Vec<&String> = environs.keys().collect();
-
-//                     results[0] = string_array_to_val(&mut caller, &list);
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module.imports().find(|func| func.name() == "sqliteOpen") {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "sqliteOpen",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller, params, results| {
-//                     let path = val_to_string(&mut caller, params.get(0).unwrap());
-//                     let connection = Connection::open_thread_safe(path);
-
-//                     if connection.is_err() {
-//                         results[0] = Val::null_any_ref();
-//                     } else {
-//                         let extern_ref =
-//                             ExternRef::new(caller.as_context_mut(), connection.unwrap()).unwrap();
-//                         let any_ref =
-//                             AnyRef::convert_extern(caller.as_context_mut(), extern_ref).unwrap();
-
-//                         results[0] = Val::AnyRef(Some(any_ref));
-//                     }
-
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module.imports().find(|func| func.name() == "sqliteExecute") {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "sqliteExecute",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller, params, results| {
-//                     let query = val_to_string(&mut caller, params.get(1).unwrap());
-//                     let connection: &ConnectionThreadSafe =
-//                         val_to_externref(&mut caller, params.get(0).unwrap());
-//                     let result = connection.execute(&query);
-
-//                     results[0] = Val::I32(result.is_ok().into());
-
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module.imports().find(|func| func.name() == "sqlitePrepare") {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "sqlitePrepare",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller: Caller<'_, Context>, params, results| {
-//                     let query = val_to_string(&mut caller, params.get(1).unwrap());
-//                     let connection: &ConnectionThreadSafe =
-//                         val_to_externref(&mut caller, params.get(0).unwrap());
-
-//                     let statement = connection.prepare(query);
-
-//                     if statement.is_err() {
-//                         results[0] = Val::null_any_ref();
-//                     } else {
-//                         let extern_ref =
-//                             ExternRef::new(caller.as_context_mut(), statement.unwrap()).unwrap();
-//                         let any_ref =
-//                             AnyRef::convert_extern(caller.as_context_mut(), extern_ref).unwrap();
-
-//                         results[0] = Val::AnyRef(Some(any_ref));
-//                     }
-
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module
-//         .imports()
-//         .find(|func| func.name() == "sqliteBind<string>")
-//     {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "sqliteBind<string>",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller, params, results| {
-//                     let index = params.get(1).unwrap().unwrap_i32();
-//                     let value = val_to_string(&mut caller, params.get(2).unwrap());
-//                     let statement: &mut Statement =
-//                         val_to_externref(&mut caller, params.get(0).unwrap());
-
-//                     let result = statement.bind((index as usize, value.as_str()));
-
-//                     results[0] = Val::I32(result.is_ok().into());
-
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module
-//         .imports()
-//         .find(|func| func.name() == "sqliteBind<int>")
-//     {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "sqliteBind<int>",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller, params, results| {
-//                     let index = params.get(1).unwrap().unwrap_i32();
-//                     let value = params.get(2).unwrap().unwrap_i32();
-//                     let statement: &mut Statement =
-//                         val_to_externref(&mut caller, params.get(0).unwrap());
-
-//                     let result = statement.bind((index as usize, value as i64));
-
-//                     results[0] = Val::I32(result.is_ok().into());
-
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module
-//         .imports()
-//         .find(|func| func.name() == "sqliteBind<float>")
-//     {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "sqliteBind<float>",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller, params, results| {
-//                     let index = params.get(1).unwrap().unwrap_i32();
-//                     let value = params.get(2).unwrap().unwrap_f32();
-//                     let statement: &mut Statement =
-//                         val_to_externref(&mut caller, params.get(0).unwrap());
-
-//                     let result = statement.bind((index as usize, value as f64));
-
-//                     results[0] = Val::I32(result.is_ok().into());
-
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module
-//         .imports()
-//         .find(|func| func.name() == "sqliteBind<char[]>")
-//     {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "sqliteBind<char[]>",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller, params, results| {
-//                     let index = params.get(1).unwrap().unwrap_i32();
-//                     let value = val_to_char_array(&mut caller, params.get(2).unwrap());
-//                     let statement: &mut Statement =
-//                         val_to_externref(&mut caller, params.get(0).unwrap());
-
-//                     let result = statement.bind((index as usize, value.as_slice()));
-
-//                     results[0] = Val::I32(result.is_ok().into());
-
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module
-//         .imports()
-//         .find(|func| func.name() == "sqliteBindNull")
-//     {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "sqliteBindNull",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller, params, results| {
-//                     let index = params.get(1).unwrap().unwrap_i32();
-//                     let statement: &mut Statement =
-//                         val_to_externref(&mut caller, params.get(0).unwrap());
-
-//                     let result = statement.bind((index as usize, sqlite::Value::Null));
-
-//                     results[0] = Val::I32(result.is_ok().into());
-
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module.imports().find(|func| func.name() == "sqliteNext") {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "sqliteNext",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller, params, results| {
-//                     let statement: &mut Statement =
-//                         val_to_externref(&mut caller, params.get(0).unwrap());
-
-//                     let state = statement.next();
-
-//                     match state {
-//                         Ok(state) => {
-//                             if state == State::Row {
-//                                 results[0] = Val::I32(1);
-//                             } else {
-//                                 results[0] = Val::I32(0);
-//                             }
-//                         }
-//                         Err(_) => {
-//                             results[0] = Val::I32(0);
-//                         }
-//                     }
-
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module
-//         .imports()
-//         .find(|func| func.name() == "sqliteRead<string>")
-//     {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "sqliteRead<string>",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller, params, results| {
-//                     let value = val_to_string(&mut caller, params.get(1).unwrap());
-//                     let statement: &mut Statement =
-//                         val_to_externref(&mut caller, params.get(0).unwrap());
-
-//                     let result: String = statement.read(value.as_str()).unwrap_or_default();
-
-//                     results[0] = string_to_val(&mut caller, &result);
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module
-//         .imports()
-//         .find(|func| func.name() == "sqliteRead<int>")
-//     {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "sqliteRead<int>",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller, params, results| {
-//                     let value = val_to_string(&mut caller, params.get(1).unwrap());
-//                     let statement: &mut Statement =
-//                         val_to_externref(&mut caller, params.get(0).unwrap());
-
-//                     let result: i64 = statement.read(value.as_str()).unwrap_or_default();
-
-//                     results[0] = Val::I32(result as i32);
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module
-//         .imports()
-//         .find(|func| func.name() == "sqliteRead<float>")
-//     {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "sqliteRead<float>",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller, params, results| {
-//                     let value = val_to_string(&mut caller, params.get(1).unwrap());
-//                     let statement: &mut Statement =
-//                         val_to_externref(&mut caller, params.get(0).unwrap());
-
-//                     let result: f64 = statement.read(value.as_str()).unwrap_or_default();
-
-//                     results[0] = Val::F32(f32::to_bits(result as f32));
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module
-//         .imports()
-//         .find(|func| func.name() == "sqliteRead<char[]>")
-//     {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "sqliteRead<char[]>",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller, params, results| {
-//                     let value = val_to_string(&mut caller, params.get(1).unwrap());
-//                     let statement: &mut Statement =
-//                         val_to_externref(&mut caller, params.get(0).unwrap());
-
-//                     let result: Vec<u8> = statement.read(value.as_str()).unwrap_or_default();
-
-//                     results[0] = char_array_to_val(&mut caller, result);
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     if let Some(func_ty) = module
-//         .imports()
-//         .find(|func| func.name() == "sqliteReadNull")
-//     {
-//         linker
-//             .func_new(
-//                 "env",
-//                 "sqliteReadNull",
-//                 func_ty.ty().func().unwrap().clone(),
-//                 move |mut caller, params, results| {
-//                     let value = val_to_string(&mut caller, params.get(1).unwrap());
-//                     let statement: &mut Statement =
-//                         val_to_externref(&mut caller, params.get(0).unwrap());
-
-//                     let result: Value = statement.read(value.as_str()).unwrap_or_default();
-
-//                     results[0] = Val::I32((result == Value::Null) as i32);
-//                     Ok(())
-//                 },
-//             )
-//             .unwrap();
-//     }
-
-//     linker.instantiate_pre(module).unwrap()
-// }
+fn link_scripts(scope: &mut v8::HandleScope, imports: v8::Local<'_, v8::Object>) {
+    let env = v8::Object::new(scope);
+
+    let name = v8::String::new(scope, "print").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut _rv: v8::ReturnValue| {
+            let result = val_to_string(scope, args.get(0));
+            let context: &mut Context = scope.get_slot_mut().unwrap();
+            context.output.push_str(&result);
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "println").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut _rv: v8::ReturnValue| {
+            let result = val_to_string(scope, args.get(0));
+
+            let context: &mut Context = scope.get_slot_mut().unwrap();
+            context.output.push_str(&result);
+            context.output.push('\n');
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "hash").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let password = val_to_string(scope, args.get(0));
+            let result = hash(password, DEFAULT_COST).unwrap();
+
+            rv.set(string_to_val(scope, &result));
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "verify").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let password = val_to_string(scope, args.get(0));
+            let hash = val_to_string(scope, args.get(1));
+            let result = verify(password, &hash).unwrap();
+
+            rv.set_bool(result);
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "body").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         _args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let context: &mut Context = scope.get_slot_mut().unwrap();
+
+            let input = std::mem::take(&mut context.input);
+            let result = string_to_val(scope, &input);
+            rv.set(result);
+
+            let context: &mut Context = scope.get_slot_mut().unwrap();
+            context.input = input;
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "urlEncode").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let input = val_to_string(scope, args.get(0));
+            let output =
+                percent_encoding::utf8_percent_encode(&input, NON_ALPHANUMERIC).to_string();
+
+            let result = string_to_val(scope, &output);
+            rv.set(result);
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "urlDecode").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let input = val_to_string(scope, args.get(0));
+            let output = percent_encoding::percent_decode_str(&input)
+                .decode_utf8()
+                .unwrap_or("".into())
+                .replace("+", " ");
+
+            let result = string_to_val(scope, &output);
+            rv.set(result);
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "markdown").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let input = val_to_string(scope, args.get(0));
+            let output = markdown::to_html_with_options(
+                &input,
+                &Options {
+                    compile: CompileOptions {
+                        allow_dangerous_html: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .unwrap_or("".to_owned());
+
+            let result = string_to_val(scope, &output);
+            rv.set(result);
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "query").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         _args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let context: &Context = scope.get_slot().unwrap();
+            let environs = context.environs.clone();
+            let default = String::new();
+            let value = environs.get("QUERY_STRING").unwrap_or(&default);
+            let result = string_to_val(scope, &value);
+
+            rv.set(result);
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "header").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut _rv: v8::ReturnValue| {
+            let header = val_to_string(scope, args.get(0));
+            let context: &mut Context = scope.get_slot_mut().unwrap();
+
+            context.headers.push_str(header.trim());
+            context.headers.push('\n');
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "cookie").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let name = val_to_string(scope, args.get(0));
+
+            let context: &mut Context = scope.get_slot_mut().unwrap();
+            let default = "".to_owned();
+            let cookie = context.environs.get("HTTP_COOKIE").unwrap_or(&default);
+
+            if let Some(mut start) = cookie.find(&(name.clone() + "=")) {
+                start += name.len() + 1;
+
+                let mut end = start;
+                while end < cookie.len() {
+                    if cookie.as_bytes()[end] == b';' {
+                        break;
+                    }
+
+                    end += 1;
+                }
+
+                let result = &cookie[start..end].trim().to_owned();
+                rv.set(string_to_val(scope, result));
+            } else {
+                rv.set(string_to_val(scope, &default));
+            }
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "uuid").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         _args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let uuid = Uuid::new_v4();
+            rv.set(string_to_val(scope, &uuid.as_hyphenated().to_string()));
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "date").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let epoch = args.get(0).int32_value(scope).unwrap();
+            let format = val_to_string(scope, args.get(1));
+
+            let datetime = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs(epoch as u64));
+            let result = datetime.format(&format).to_string();
+
+            rv.set(string_to_val(scope, &result));
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "now").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |_scope: &mut v8::HandleScope,
+         _args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            rv.set_uint32(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as u32,
+            );
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "getEnviron").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let context: &mut Context = scope.get_slot_mut().unwrap();
+
+            let environs = context.environs.clone();
+            let key = val_to_string(scope, args.get(0));
+            let default = String::new();
+            let value = environs.get(&key).unwrap_or(&default);
+
+            rv.set(string_to_val(scope, &value));
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "sqliteOpen").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let path = val_to_string(scope, args.get(0));
+            let connection = Connection::open_thread_safe(path);
+
+            if connection.is_err() {
+                println!("{:?}", connection.err());
+                rv.set_null();
+            } else {
+                let result = extern_to_val(scope, connection.unwrap());
+                rv.set(result);
+            }
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "sqliteExecute").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let connection: &ConnectionThreadSafe = val_to_extern(args.get(0));
+            let query = val_to_string(scope, args.get(1));
+            let result = connection.execute(&query);
+
+            rv.set_bool(result.is_ok());
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "sqlitePrepare").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let connection: &ConnectionThreadSafe = val_to_extern(args.get(0));
+            let query = val_to_string(scope, args.get(1));
+            println!("{}", query);
+
+            let statement = connection.prepare(query);
+
+            if statement.is_err() {
+                rv.set_null();
+            } else {
+                let result = extern_to_val(scope, statement.unwrap());
+                rv.set(result);
+            }
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "sqliteBind<string>").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let statement: &mut Statement = val_to_extern(args.get(0));
+            let index = args.get(1).int32_value(scope).unwrap();
+            let value = val_to_string(scope, args.get(2));
+
+            let statement = statement.bind((index as usize, value.as_str()));
+            rv.set_bool(statement.is_err());
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "sqliteBind<int>").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let statement: &mut Statement = val_to_extern(args.get(0));
+            let index = args.get(1).int32_value(scope).unwrap();
+            let value = args.get(2).int32_value(scope).unwrap();
+
+            let statement = statement.bind((index as usize, value as i64));
+            rv.set_bool(statement.is_err());
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "sqliteBind<float>").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let statement: &mut Statement = val_to_extern(args.get(0));
+            let index = args.get(1).int32_value(scope).unwrap();
+            let value = args.get(2).number_value(scope).unwrap();
+
+            let statement = statement.bind((index as usize, value));
+            rv.set_bool(statement.is_err());
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "sqliteBind<bool>").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let statement: &mut Statement = val_to_extern(args.get(0));
+            let index = args.get(1).int32_value(scope).unwrap();
+            let value = args.get(2).number_value(scope).unwrap();
+
+            let statement = statement.bind((index as usize, value));
+            rv.set_bool(statement.is_err());
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "sqliteBindNull").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let statement: &mut Statement = val_to_extern(args.get(0));
+            let index = args.get(1).int32_value(scope).unwrap();
+
+            let statement = statement.bind((index as usize, sqlite::Value::Null));
+            rv.set_bool(statement.is_err());
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "sqliteNext").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |_scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let statement: &mut Statement = val_to_extern(args.get(0));
+
+            let state = statement.next();
+
+            match state {
+                Ok(state) => {
+                    if state == State::Row {
+                        rv.set_int32(1);
+                    } else {
+                        rv.set_int32(0);
+                    }
+                }
+                Err(_) => {
+                    rv.set_int32(0);
+                }
+            }
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "sqliteRead<string>").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let statement: &mut Statement = val_to_extern(args.get(0));
+            let value = val_to_string(scope, args.get(1));
+
+            let result: String = statement.read(value.as_str()).unwrap_or_default();
+            rv.set(string_to_val(scope, &result));
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "sqliteRead<int>").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let statement: &mut Statement = val_to_extern(args.get(0));
+            let value = val_to_string(scope, args.get(1));
+
+            let result: i64 = statement.read(value.as_str()).unwrap_or_default();
+            rv.set_int32(result as i32);
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "sqliteRead<float>").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let statement: &mut Statement = val_to_extern(args.get(0));
+            let value = val_to_string(scope, args.get(1));
+
+            let result: f64 = statement.read(value.as_str()).unwrap_or_default();
+            rv.set_double(result);
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "sqliteRead<float>").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let statement: &mut Statement = val_to_extern(args.get(0));
+            let value = val_to_string(scope, args.get(1));
+
+            let result: f64 = statement.read(value.as_str()).unwrap_or_default();
+            rv.set_double(result);
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let name = v8::String::new(scope, "sqliteReadNull").unwrap();
+    let func = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let statement: &mut Statement = val_to_extern(args.get(0));
+            let value = val_to_string(scope, args.get(1));
+
+            let result: Value = statement.read(value.as_str()).unwrap_or_default();
+            rv.set_bool(result == Value::Null);
+        },
+    )
+    .unwrap();
+    env.set(scope, name.into(), func.into()).unwrap();
+
+    let import_name = v8::String::new(scope, "env").unwrap();
+    imports.set(scope, import_name.into(), env.into()).unwrap();
+}
 
 fn run_script(
     req: &mut Request,
@@ -1336,31 +1096,34 @@ fn run_script(
         .unwrap()
         .cast::<v8::Object>();
 
-    let at_name = v8::String::new(scope, "string.at").unwrap();
-    let at = exports
-        .get(scope, at_name.into())
+    let to_string_name = v8::String::new(scope, "toString").unwrap();
+    let to_string = exports
+        .get(scope, to_string_name.into())
         .unwrap()
         .cast::<v8::Function>();
+    let to_string = v8::Global::new(scope, to_string);
 
-    let length_name = v8::String::new(scope, "string.length").unwrap();
-    let length = exports
-        .get(scope, length_name.into())
+    let from_string_name = v8::String::new(scope, "fromString").unwrap();
+    let from_string = exports
+        .get(scope, from_string_name.into())
         .unwrap()
         .cast::<v8::Function>();
+    let from_string = v8::Global::new(scope, from_string);
 
-    // let memory_name = v8::String::new(scope, "memory").unwrap();
-    // let memory = exports
-    //     .get(scope, memory_name.into())
-    //     .unwrap()
-    //     .cast::<v8::WasmMemoryObject>();
+    let memory_name = v8::String::new(scope, "memory").unwrap();
+    let memory = exports
+        .get(scope, memory_name.into())
+        .unwrap()
+        .cast::<v8::WasmMemoryObject>();
 
-    // let buffer = memory.buffer();
-    // let backing = buffer.get_backing_store();
+    let buffer = memory.buffer();
+    let backing = buffer.get_backing_store();
 
     let instant = Instant::now();
     let environs = req.params();
     let headers = String::new();
     let output = String::new();
+    let externals = Vec::new();
     let mut input = String::new();
     req.stdin().read_to_string(&mut input).unwrap();
 
@@ -1369,8 +1132,10 @@ fn run_script(
         input,
         output,
         environs,
-        at: v8::Global::new(scope, at),
-        length: v8::Global::new(scope, length),
+        backing,
+        externals,
+        from_string,
+        to_string,
     };
 
     scope.set_slot(context);
@@ -1389,6 +1154,10 @@ fn run_script(
         context
             .headers
             .push_str("Content-Type: text/html; charset=UTF-8\n");
+    }
+
+    for external in context.externals {
+        unsafe { drop(Box::from_raw(external)) };
     }
 
     write!(
@@ -1541,50 +1310,11 @@ fn main() -> ExitCode {
     let handle_scope = &mut v8::HandleScope::new(isolate);
     let context = v8::Context::new(handle_scope, Default::default());
     let scope = &mut v8::ContextScope::new(handle_scope, context);
-    let env = v8::Object::new(scope);
 
-    let name = v8::String::new(scope, "print").unwrap();
-    let func = v8::Function::new(
-        scope,
-        |scope: &mut v8::HandleScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue| {
-            let context: &Context = scope.get_slot().unwrap();
-            let length = context.length.clone();
-            let at = context.at.clone();
-            let at = v8::Local::new(scope, at);
-
-            let arg = args.get(0);
-            let length = v8::Local::new(scope, length)
-                .call(scope, arg, &[arg])
-                .unwrap()
-                .int32_value(scope)
-                .unwrap();
-
-            let mut buf = Vec::with_capacity(length as usize);
-
-            for i in 0..length {
-                let index = v8::Integer::new(scope, i).into();
-                let result = at
-                    .call(scope, arg, &[arg, index])
-                    .unwrap()
-                    .int32_value(scope)
-                    .unwrap();
-                buf.push(result as u8);
-            }
-
-            let string = unsafe { String::from_utf8_unchecked(buf) };
-            let context: &mut Context = scope.get_slot_mut().unwrap();
-
-            context.output += &string;
-        },
-    )
-    .unwrap();
-    env.set(scope, name.into(), func.into()).unwrap();
-
-    let import_name = v8::String::new(scope, "env").unwrap();
     let imports = v8::Object::new(scope);
-    imports.set(scope, import_name.into(), env.into()).unwrap();
-
     let mut scripts = HashMap::<String, Script>::new();
+
+    link_scripts(scope, imports);
 
     if env::args().count() > 2 {
         let listener = TcpListener::bind(args().nth(2).unwrap()).unwrap();
