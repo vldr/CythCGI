@@ -1364,7 +1364,7 @@ fn main() -> ExitCode {
             fastcgi::run(|req| request(req, scope, &mut scripts, imports), transport);
         });
 
-        if i == num_cpus::get() - 1 {
+        if i == num_cpus::get_physical() - 1 {
             thread.join().unwrap();
         }
     }
