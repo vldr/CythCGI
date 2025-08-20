@@ -1,6 +1,7 @@
 extern crate fastcgi;
 
 use std::{
+    any::Any,
     cmp,
     collections::HashMap,
     env::{self, args},
@@ -37,7 +38,7 @@ struct Context {
     headers: String,
     environs: HashMap<String, String>,
     backing: v8::SharedRef<v8::BackingStore>,
-    externals: Vec<*mut c_void>,
+    externals: Vec<Box<dyn Any>>,
     to_string: v8::Global<v8::Function>,
     from_string: v8::Global<v8::Function>,
 }
@@ -398,10 +399,14 @@ fn string_to_val<'a>(scope: &mut v8::HandleScope<'a>, arg: &str) -> v8::Local<'a
     to_string
 }
 
-pub fn extern_to_val<'s, T>(scope: &mut v8::HandleScope<'s>, val: T) -> v8::Local<'s, v8::Value> {
+pub fn extern_to_val<'s, T>(scope: &mut v8::HandleScope<'s>, val: T) -> v8::Local<'s, v8::Value>
+where
+    T: 'static,
+{
     let context: &mut Context = scope.get_slot_mut().unwrap();
+
     let raw: *mut T = Box::into_raw(Box::new(val));
-    context.externals.push(raw as *mut c_void);
+    context.externals.push(unsafe { Box::from_raw(raw) });
 
     let external = v8::External::new(scope, raw as *mut c_void);
 
@@ -565,7 +570,11 @@ fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
     (output, mapping)
 }
 
-fn link_scripts<'a>(scope: &mut v8::HandleScope<'a>) -> v8::Local<'a, v8::Object> {
+fn link_scripts(isolate: &mut v8::Isolate) -> v8::Global<v8::Object> {
+    let handle_scope = &mut v8::HandleScope::new(isolate);
+    let context = v8::Context::new(handle_scope, Default::default());
+    let scope = &mut v8::ContextScope::new(handle_scope, context);
+
     let imports = v8::Object::new(scope);
     let env = v8::Object::new(scope);
 
@@ -1096,7 +1105,7 @@ fn link_scripts<'a>(scope: &mut v8::HandleScope<'a>) -> v8::Local<'a, v8::Object
     let import_name = v8::String::new(scope, "env").unwrap();
     imports.set(scope, import_name.into(), env.into()).unwrap();
 
-    imports
+    v8::Global::new(scope, imports)
 }
 
 fn run_script(
@@ -1176,10 +1185,6 @@ fn run_script(
             .push_str("Content-Type: text/html; charset=UTF-8\n");
     }
 
-    for external in context.externals {
-        unsafe { drop(Box::from_raw(external)) };
-    }
-
     write!(
         &mut req.stdout(),
         "Interval: {:?}\n{}\n{}",
@@ -1190,12 +1195,16 @@ fn run_script(
     .unwrap_or(());
 }
 
-fn request(mut req: Request, isolate: &mut v8::Isolate, scripts: &mut HashMap<String, Script>) {
+fn request(
+    mut req: Request,
+    isolate: &mut v8::Isolate,
+    scripts: &mut HashMap<String, Script>,
+    imports: v8::Global<v8::Object>,
+) {
     let handle_scope = &mut v8::HandleScope::new(isolate);
     let context = v8::Context::new(handle_scope, Default::default());
     let scope = &mut v8::ContextScope::new(handle_scope, context);
-
-    let imports = link_scripts(scope);
+    let imports = v8::Local::new(scope, imports);
 
     let result = catch_unwind(AssertUnwindSafe(|| {
         let Some(path) = req.param("SCRIPT_FILENAME") else {
@@ -1356,14 +1365,14 @@ fn main() -> ExitCode {
 
     for i in 0..num_cpus::get_physical() {
         let thread = thread::spawn(move || {
-            let isolate = &mut v8::Isolate::new(v8::CreateParams::default());
-            // let handle_scope = &mut v8::HandleScope::new(isolate);
-            // let context = v8::Context::new(handle_scope, Default::default());
-            // let scope = &mut v8::ContextScope::new(handle_scope, context);
-
             let mut scripts = HashMap::<String, Script>::new();
+            let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+            let imports = link_scripts(&mut isolate);
 
-            fastcgi::run(|req| request(req, isolate, &mut scripts), transport);
+            fastcgi::run(
+                |req| request(req, &mut isolate, &mut scripts, imports.clone()),
+                transport,
+            );
         });
 
         if i == num_cpus::get_physical() - 1 {
