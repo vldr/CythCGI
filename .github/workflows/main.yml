@@ -19,6 +19,7 @@ jobs:
       - name: Build
         run: |
           cargo build --release
+          mv /home/ubuntu/Desktop/CGI/cyth-cgi /tmp/
           cp target/release/cyth-cgi /home/ubuntu/Desktop/CGI/
 
       - name: Publish
