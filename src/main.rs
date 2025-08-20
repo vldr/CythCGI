@@ -1349,7 +1349,7 @@ fn main() -> ExitCode {
         }
     }
 
-    for i in 0..num_cpus::get() {
+    for i in 0..num_cpus::get_physical() {
         let thread = thread::spawn(move || {
             let isolate = &mut v8::Isolate::new(v8::CreateParams::default());
             let handle_scope = &mut v8::HandleScope::new(isolate);

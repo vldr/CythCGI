@@ -19,6 +19,7 @@ jobs:
       - name: Build
         run: |
           cargo build --release
+          cp target/release/cyth-cgi /home/ubuntu/Desktop/CGI/
 
       - name: Publish
         uses: actions/upload-artifact@v4
