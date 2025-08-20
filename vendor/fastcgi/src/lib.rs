@@ -472,7 +472,7 @@ pub struct Request {
     sock: Rc<Socket>,
     id: u16,
     role: Role,
-    params: Arc<HashMap<String, String>>,
+    params: HashMap<String, String>,
     aborted: bool,
     status: i32,
     buf: Vec<u8>,
@@ -594,7 +594,7 @@ impl Request {
     }
 
     /// Iterates over the FastCGI parameters.
-    pub fn params(&self) -> Arc<HashMap<String, String>> {
+    pub fn params(&self) -> HashMap<String, String> {
         self.params.clone()
     }
 

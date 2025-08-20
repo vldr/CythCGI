@@ -11,7 +11,6 @@ use std::{
     os::fd::AsRawFd,
     panic::{AssertUnwindSafe, catch_unwind},
     process::{Command, ExitCode, Stdio},
-    sync::Arc,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -27,7 +26,7 @@ use sqlite::{Connection, ConnectionThreadSafe, State, Statement, Value};
 use uuid::Uuid;
 
 struct Script<'a> {
-    // modified: SystemTime,
+    modified: SystemTime,
     instance: v8::Local<'a, v8::Function>,
     module: v8::Local<'a, v8::WasmModuleObject>,
 }
@@ -36,7 +35,7 @@ struct Context {
     input: String,
     output: String,
     headers: String,
-    environs: Arc<HashMap<String, String>>,
+    environs: HashMap<String, String>,
     backing: v8::SharedRef<v8::BackingStore>,
     externals: Vec<*mut c_void>,
     to_string: v8::Global<v8::Function>,
@@ -718,9 +717,9 @@ fn link_scripts(scope: &mut v8::HandleScope, imports: v8::Local<'_, v8::Object>)
          _args: v8::FunctionCallbackArguments,
          mut rv: v8::ReturnValue| {
             let context: &Context = scope.get_slot().unwrap();
-            let environs = context.environs.clone();
+            let environs = &context.environs;
             let default = String::new();
-            let value = environs.get("QUERY_STRING").unwrap_or(&default);
+            let value = environs.get("QUERY_STRING").unwrap_or(&default).clone();
             let result = string_to_val(scope, &value);
 
             rv.set(result);
@@ -833,12 +832,10 @@ fn link_scripts(scope: &mut v8::HandleScope, imports: v8::Local<'_, v8::Object>)
         |scope: &mut v8::HandleScope,
          args: v8::FunctionCallbackArguments,
          mut rv: v8::ReturnValue| {
-            let context: &mut Context = scope.get_slot_mut().unwrap();
-
-            let environs = context.environs.clone();
             let key = val_to_string(scope, args.get(0));
             let default = String::new();
-            let value = environs.get(&key).unwrap_or(&default);
+            let context: &mut Context = scope.get_slot_mut().unwrap();
+            let value = context.environs.get(&key).unwrap_or(&default).clone();
 
             rv.set(string_to_val(scope, &value));
         },
@@ -1180,8 +1177,6 @@ fn run_script(
         unsafe { drop(Box::from_raw(external)) };
     }
 
-    scope.request_garbage_collection_for_testing(v8::GarbageCollectionType::Minor);
-
     write!(
         &mut req.stdout(),
         "Interval: {:?}\n{}\n{}",
@@ -1203,19 +1198,25 @@ fn request<'a, 'b>(
             panic!("Missing 'SCRIPT_FILENAME' environment variable")
         };
 
-        // let Ok(metadata) = fs::metadata(&path) else {
-        //     write!(
-        //         &mut req.stdout(),
-        //         "{}{}",
-        //         "Status: 404 Not Found\n",
-        //         "Content-Type: text/plain\n\n"
-        //     )
-        //     .unwrap_or(());
-        //     return;
-        // };
+        let Ok(metadata) = fs::metadata(&path) else {
+            write!(
+                &mut req.stdout(),
+                "{}{}",
+                "Status: 404 Not Found\n",
+                "Content-Type: text/plain\n\n"
+            )
+            .unwrap_or(());
+            return;
+        };
 
         let script = scripts.get(&path);
-        if script.is_none() {
+        if script.is_none()
+            || script
+                .as_ref()
+                .unwrap()
+                .modified
+                .ne(&metadata.modified().unwrap())
+        {
             let mut child = Command::new(args().nth(1).unwrap())
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -1282,7 +1283,7 @@ fn request<'a, 'b>(
             run_script(&mut req, scope, instance, module, imports);
 
             let script = Script {
-                // modified: metadata.modified().unwrap(),
+                modified: metadata.modified().unwrap(),
                 instance,
                 module,
             };
@@ -1319,7 +1320,6 @@ fn main() -> ExitCode {
     }
 
     let platform = v8::new_default_platform(0, false).make_shared();
-    v8::V8::set_flags_from_string("--expose-gc");
     v8::V8::initialize_platform(platform);
     v8::V8::initialize();
 
