@@ -402,8 +402,6 @@ pub fn extern_to_val<'s, T>(scope: &mut v8::HandleScope<'s>, val: T) -> v8::Loca
     let raw: *mut T = Box::into_raw(Box::new(val));
     context.externals.push(raw as *mut c_void);
 
-    println!("{:?}", raw);
-
     let external = v8::External::new(scope, raw as *mut c_void);
 
     external.into()
@@ -411,7 +409,6 @@ pub fn extern_to_val<'s, T>(scope: &mut v8::HandleScope<'s>, val: T) -> v8::Loca
 
 pub fn val_to_extern<'s, T>(val: v8::Local<'s, v8::Value>) -> &'s mut T {
     let external = val.cast::<v8::External>();
-    println!("a {:?}", external.value());
 
     unsafe { &mut *(external.value() as *mut T) }
 }
@@ -502,13 +499,25 @@ fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
             if input.as_bytes()[i] == b'<' && i + 1 < input.len() && input.as_bytes()[i + 1] == b'?'
             {
                 if start < i {
+                    let mut count = 0;
                     mapping.push((start_line, start_column - 1));
-
                     output += "print(\"";
+
                     for c in &input.as_bytes()[start..i] {
+                        if count == 10000 {
+                            mapping.push((start_line, start_column - 1));
+
+                            output += "\")\n";
+                            output += "print(\"";
+
+                            count = 0;
+                        }
+
                         output += "\\x";
                         output.push(hex_from_digit(c / 16));
                         output.push(hex_from_digit(c % 16));
+
+                        count += 1;
                     }
                     output += "\")\n";
                 }
@@ -525,13 +534,24 @@ fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
         output += &dedent(&input[start..], &mut mapping, start_line, start_column);
     } else {
         if start < input.len() {
+            let mut count = 0;
             mapping.push((start_line, start_column - 1));
-
             output += "print(\"";
+
             for c in &input.as_bytes()[start..] {
+                if count == 10000 {
+                    mapping.push((start_line, start_column - 1));
+
+                    output += "\")\n";
+                    output += "print(\"";
+
+                    count = 0;
+                }
+
                 output += "\\x";
                 output.push(hex_from_digit(c / 16));
                 output.push(hex_from_digit(c % 16));
+                count += 1;
             }
             output += "\")\n";
         }
@@ -834,7 +854,6 @@ fn link_scripts(scope: &mut v8::HandleScope, imports: v8::Local<'_, v8::Object>)
             let connection = Connection::open_thread_safe(path);
 
             if connection.is_err() {
-                println!("{:?}", connection.err());
                 rv.set_null();
             } else {
                 let result = extern_to_val(scope, connection.unwrap());
@@ -869,7 +888,6 @@ fn link_scripts(scope: &mut v8::HandleScope, imports: v8::Local<'_, v8::Object>)
          mut rv: v8::ReturnValue| {
             let connection: &ConnectionThreadSafe = val_to_extern(args.get(0));
             let query = val_to_string(scope, args.get(1));
-            println!("{}", query);
 
             let statement = connection.prepare(query);
 
@@ -1084,7 +1102,7 @@ fn run_script(
     scope: &mut v8::ContextScope<'_, v8::HandleScope<'_>>,
     instance: v8::Local<'_, v8::Function>,
     module: v8::Local<'_, v8::WasmModuleObject>,
-    imports: v8::Local<'_, v8::Value>,
+    imports: v8::Local<'_, v8::Object>,
 ) {
     let exports_name = v8::String::new(scope, "exports")
         .unwrap()
@@ -1174,7 +1192,7 @@ fn request<'a, 'b>(
     mut req: Request,
     scope: &mut v8::ContextScope<'a, v8::HandleScope<'b>>,
     scripts: &mut HashMap<String, Script<'a>>,
-    imports: v8::Local<'_, v8::Value>,
+    imports: v8::Local<'_, v8::Object>,
 ) {
     let result = catch_unwind(AssertUnwindSafe(|| {
         let Some(path) = req.param("SCRIPT_FILENAME") else {
@@ -1318,10 +1336,7 @@ fn main() -> ExitCode {
 
     if env::args().count() > 2 {
         let listener = TcpListener::bind(args().nth(2).unwrap()).unwrap();
-        fastcgi::run_tcp(
-            |req| request(req, scope, &mut scripts, imports.into()),
-            &listener,
-        );
+        fastcgi::run_tcp(|req| request(req, scope, &mut scripts, imports), &listener);
     } else {
         #[cfg(unix)]
         {
