@@ -204,6 +204,7 @@ dependencies = [
  "dashmap",
  "fastcgi",
  "markdown",
+ "num_cpus",
  "percent-encoding",
  "regex",
  "sqlite",
@@ -244,17 +245,6 @@ dependencies = [
 [[package]]
 name = "fastcgi"
 version = "1.0.0"
-dependencies = [
- "fork",
- "libc",
- "num_cpus",
-]
-
-[[package]]
-name = "fork"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05dc8b302e04a1c27f4fe694439ef0f29779ca4edc205b7b58f00db04e29656d"
 dependencies = [
  "libc",
 ]

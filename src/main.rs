@@ -8,9 +8,11 @@ use std::{
     fs,
     io::{Read, Write},
     net::TcpListener,
+    os::fd::AsRawFd,
     panic::{AssertUnwindSafe, catch_unwind},
     process::{Command, ExitCode, Stdio},
     sync::Arc,
+    thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -1324,27 +1326,46 @@ fn main() -> ExitCode {
     v8::V8::initialize_platform(platform);
     v8::V8::initialize();
 
-    let isolate = &mut v8::Isolate::new(v8::CreateParams::default());
-    let handle_scope = &mut v8::HandleScope::new(isolate);
-    let context = v8::Context::new(handle_scope, Default::default());
-    let scope = &mut v8::ContextScope::new(handle_scope, context);
+    let transport;
+    let listener;
 
-    let imports = v8::Object::new(scope);
-    let mut scripts = HashMap::<String, Script>::new();
-
-    link_scripts(scope, imports);
-
-    if env::args().count() > 2 {
-        let listener = TcpListener::bind(args().nth(2).unwrap()).unwrap();
-        fastcgi::run_tcp(|req| request(req, scope, &mut scripts, imports), &listener);
-    } else {
-        #[cfg(unix)]
-        {
-            fastcgi::run(|req| request(req, scope, &mut scripts, imports.into()));
+    #[cfg(unix)]
+    {
+        if env::args().count() > 2 {
+            listener = TcpListener::bind(args().nth(2).unwrap()).unwrap();
+            transport = fastcgi::unix::Transport::from_raw_fd(listener.as_raw_fd());
+        } else {
+            transport = fastcgi::unix::Transport::new();
         }
-        #[cfg(not(unix))]
-        {
+    }
+
+    #[cfg(windows)]
+    {
+        if env::args().count() > 2 {
+            listener = TcpListener::bind(args().nth(2).unwrap()).unwrap();
+            transport = fastcgi::windows::Transport::from_tcp(&listener);
+        } else {
             panic!("Unix sockets are not supported on this platform");
+        }
+    }
+
+    for i in 0..num_cpus::get() {
+        let thread = thread::spawn(move || {
+            let isolate = &mut v8::Isolate::new(v8::CreateParams::default());
+            let handle_scope = &mut v8::HandleScope::new(isolate);
+            let context = v8::Context::new(handle_scope, Default::default());
+            let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+            let imports = v8::Object::new(scope);
+            let mut scripts = HashMap::<String, Script>::new();
+
+            link_scripts(scope, imports);
+
+            fastcgi::run(|req| request(req, scope, &mut scripts, imports), transport);
+        });
+
+        if i == num_cpus::get() - 1 {
+            thread.join().unwrap();
         }
     }
 

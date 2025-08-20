@@ -53,12 +53,12 @@ use std::thread;
 #[cfg(unix)]
 use unix::{Socket, Transport};
 #[cfg(unix)]
-mod unix;
+pub mod unix;
 
 #[cfg(windows)]
 use windows::{Socket, Transport};
 #[cfg(windows)]
-mod windows;
+pub mod windows;
 
 const HEADER_LEN: usize = 8;
 
@@ -661,21 +661,12 @@ fn run_transport<F>(mut handler: F, transport: &mut Transport)
 where
     F: FnMut(Request),
 {
-    for _ in 0..0 {
-        match fork::fork() {
-            Ok(fork::Fork::Parent(child)) => {
-                break;
-            }
-            Ok(fork::Fork::Child) => println!("I'm a new child process"),
-            Err(_) => println!("Fork failed"),
-        }
-    }
-
     let addrs: Option<HashSet<String>> = match std::env::var("FCGI_WEB_SERVER_ADDRS") {
         Ok(value) => Some(value.split(',').map(|s| s.to_owned()).collect()),
         Err(std::env::VarError::NotPresent) => None,
         Err(e) => Err(e).unwrap(),
     };
+
     loop {
         let sock = match transport.accept() {
             Ok(sock) => sock,
@@ -702,44 +693,10 @@ where
     }
 }
 
-#[cfg(unix)]
 /// Runs as a FastCGI process with the given handler.
-///
-/// Available under Unix only. If you are using Windows, use `run_tcp` instead.
-pub fn run<F>(handler: F)
+pub fn run<F>(handler: F, mut transport: Transport)
 where
     F: FnMut(Request),
 {
-    run_transport(handler, &mut Transport::new())
-}
-
-#[cfg(unix)]
-/// Accepts requests from a user-supplied raw file descriptor. IPv4, IPv6, and
-/// Unix domain sockets are supported.
-///
-/// Available under Unix only.
-pub fn run_raw<F>(handler: F, raw_fd: std::os::unix::io::RawFd)
-where
-    F: FnMut(Request),
-{
-    run_transport(handler, &mut Transport::from_raw_fd(raw_fd))
-}
-
-#[cfg(unix)]
-/// Accepts requests from a user-supplied TCP listener.
-pub fn run_tcp<F>(handler: F, listener: &TcpListener)
-where
-    F: FnMut(Request),
-{
-    use std::os::unix::io::AsRawFd;
-    run_transport(handler, &mut Transport::from_raw_fd(listener.as_raw_fd()))
-}
-
-#[cfg(windows)]
-/// Accepts requests from a user-supplied TCP listener.
-pub fn run_tcp<F>(handler: F, listener: &TcpListener)
-where
-    F: FnMut(Request),
-{
-    run_transport(handler, &mut Transport::from_tcp(&listener))
+    run_transport(handler, &mut transport)
 }
