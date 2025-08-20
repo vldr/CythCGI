@@ -1115,6 +1115,7 @@ fn run_script(
     module: v8::Local<'_, v8::WasmModuleObject>,
     imports: v8::Local<'_, v8::Object>,
 ) {
+    let instant = Instant::now();
     let exports_name = v8::String::new(scope, "exports")
         .unwrap()
         .cast::<v8::Value>();
@@ -1148,7 +1149,6 @@ fn run_script(
     let buffer = memory.buffer();
     let backing = buffer.get_backing_store();
 
-    let instant = Instant::now();
     let environs = req.params();
     let headers = String::new();
     let output = String::new();
