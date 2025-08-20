@@ -27,7 +27,7 @@ use sqlite::{Connection, ConnectionThreadSafe, State, Statement, Value};
 use uuid::Uuid;
 
 struct Script<'a> {
-    modified: SystemTime,
+    // modified: SystemTime,
     instance: v8::Local<'a, v8::Function>,
     module: v8::Local<'a, v8::WasmModuleObject>,
 }
@@ -1201,25 +1201,19 @@ fn request<'a, 'b>(
             panic!("Missing 'SCRIPT_FILENAME' environment variable")
         };
 
-        let Ok(metadata) = fs::metadata(&path) else {
-            write!(
-                &mut req.stdout(),
-                "{}{}",
-                "Status: 404 Not Found\n",
-                "Content-Type: text/plain\n\n"
-            )
-            .unwrap_or(());
-            return;
-        };
+        // let Ok(metadata) = fs::metadata(&path) else {
+        //     write!(
+        //         &mut req.stdout(),
+        //         "{}{}",
+        //         "Status: 404 Not Found\n",
+        //         "Content-Type: text/plain\n\n"
+        //     )
+        //     .unwrap_or(());
+        //     return;
+        // };
 
         let script = scripts.get(&path);
-        if script.is_none()
-            || script
-                .as_ref()
-                .unwrap()
-                .modified
-                .ne(&metadata.modified().unwrap())
-        {
+        if script.is_none() {
             let mut child = Command::new(args().nth(1).unwrap())
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -1286,7 +1280,7 @@ fn request<'a, 'b>(
             run_script(&mut req, scope, instance, module, imports);
 
             let script = Script {
-                modified: metadata.modified().unwrap(),
+                // modified: metadata.modified().unwrap(),
                 instance,
                 module,
             };
