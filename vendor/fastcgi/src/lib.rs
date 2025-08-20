@@ -661,7 +661,7 @@ fn run_transport<F>(mut handler: F, transport: &mut Transport)
 where
     F: FnMut(Request),
 {
-    for _ in 0..num_cpus::get() - 1 {
+    for _ in 0..0 {
         match fork::fork() {
             Ok(fork::Fork::Parent(child)) => {
                 break;
@@ -695,9 +695,9 @@ where
             let (request_id, role, keep_conn) = Request::begin(&sock).unwrap();
             handler(Request::new(sock.clone(), request_id, role).unwrap());
 
-            if !keep_conn {
-                break;
-            }
+            // if !keep_conn {
+            //     break;
+            // }
         }
     }
 }
