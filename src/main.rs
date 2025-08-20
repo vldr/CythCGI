@@ -1180,6 +1180,8 @@ fn run_script(
         unsafe { drop(Box::from_raw(external)) };
     }
 
+    scope.request_garbage_collection_for_testing(v8::GarbageCollectionType::Minor);
+
     write!(
         &mut req.stdout(),
         "Interval: {:?}\n{}\n{}",
