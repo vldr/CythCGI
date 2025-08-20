@@ -25,10 +25,10 @@ use fastcgi::Request;
 use sqlite::{Connection, ConnectionThreadSafe, State, Statement, Value};
 use uuid::Uuid;
 
-struct Script<'a> {
+struct Script {
     modified: SystemTime,
-    instance: v8::Local<'a, v8::Function>,
-    module: v8::Local<'a, v8::WasmModuleObject>,
+    instance: v8::Global<v8::Function>,
+    module: v8::Global<v8::WasmModuleObject>,
 }
 
 struct Context {
@@ -565,7 +565,8 @@ fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
     (output, mapping)
 }
 
-fn link_scripts(scope: &mut v8::HandleScope, imports: v8::Local<'_, v8::Object>) {
+fn link_scripts<'a>(scope: &mut v8::HandleScope<'a>) -> v8::Local<'a, v8::Object> {
+    let imports = v8::Object::new(scope);
     let env = v8::Object::new(scope);
 
     let name = v8::String::new(scope, "print").unwrap();
@@ -1094,6 +1095,8 @@ fn link_scripts(scope: &mut v8::HandleScope, imports: v8::Local<'_, v8::Object>)
 
     let import_name = v8::String::new(scope, "env").unwrap();
     imports.set(scope, import_name.into(), env.into()).unwrap();
+
+    imports
 }
 
 fn run_script(
@@ -1187,12 +1190,13 @@ fn run_script(
     .unwrap_or(());
 }
 
-fn request<'a, 'b>(
-    mut req: Request,
-    scope: &mut v8::ContextScope<'a, v8::HandleScope<'b>>,
-    scripts: &mut HashMap<String, Script<'a>>,
-    imports: v8::Local<'_, v8::Object>,
-) {
+fn request(mut req: Request, isolate: &mut v8::Isolate, scripts: &mut HashMap<String, Script>) {
+    let handle_scope = &mut v8::HandleScope::new(isolate);
+    let context = v8::Context::new(handle_scope, Default::default());
+    let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+    let imports = link_scripts(scope);
+
     let result = catch_unwind(AssertUnwindSafe(|| {
         let Some(path) = req.param("SCRIPT_FILENAME") else {
             panic!("Missing 'SCRIPT_FILENAME' environment variable")
@@ -1284,14 +1288,18 @@ fn request<'a, 'b>(
 
             let script = Script {
                 modified: metadata.modified().unwrap(),
-                instance,
-                module,
+                instance: v8::Global::new(scope, instance),
+                module: v8::Global::new(scope, module),
             };
 
             scripts.insert(path, script);
         } else {
             let script = script.unwrap();
-            run_script(&mut req, scope, script.instance, script.module, imports);
+            let instance = v8::Local::new(scope, script.instance.clone());
+            let module = v8::Local::new(scope, script.module.clone());
+            let imports = v8::Local::new(scope, imports);
+
+            run_script(&mut req, scope, instance, module, imports);
         }
     }));
 
@@ -1349,16 +1357,13 @@ fn main() -> ExitCode {
     for i in 0..num_cpus::get_physical() {
         let thread = thread::spawn(move || {
             let isolate = &mut v8::Isolate::new(v8::CreateParams::default());
-            let handle_scope = &mut v8::HandleScope::new(isolate);
-            let context = v8::Context::new(handle_scope, Default::default());
-            let scope = &mut v8::ContextScope::new(handle_scope, context);
+            // let handle_scope = &mut v8::HandleScope::new(isolate);
+            // let context = v8::Context::new(handle_scope, Default::default());
+            // let scope = &mut v8::ContextScope::new(handle_scope, context);
 
-            let imports = v8::Object::new(scope);
             let mut scripts = HashMap::<String, Script>::new();
 
-            link_scripts(scope, imports);
-
-            fastcgi::run(|req| request(req, scope, &mut scripts, imports), transport);
+            fastcgi::run(|req| request(req, isolate, &mut scripts), transport);
         });
 
         if i == num_cpus::get_physical() - 1 {
