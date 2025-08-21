@@ -25,13 +25,15 @@ use sqlite::{Connection, ConnectionThreadSafe, State, Statement, Value};
 use uuid::Uuid;
 use wasmtime::{
     AnyRef, ArrayRef, ArrayRefPre, ArrayType, AsContext, AsContextMut, Caller, Config, Engine,
-    ExternRef, FieldType, HeapType, InstanceAllocationStrategy, InstancePre, Linker, Module,
-    Mutability, RefType, StorageType, Store, StructRef, StructRefPre, StructType, Val, ValType,
+    ExternRef, FieldType, HeapType, Instance, InstanceAllocationStrategy, InstancePre, Linker,
+    Module, Mutability, RefType, StorageType, Store, StructRef, StructRefPre, StructType,
+    TypedFunc, Val, ValType,
 };
 
 struct Script {
     modified: SystemTime,
-    instance_pre: InstancePre<Context>,
+    start: wasmtime::TypedFunc<(), ()>,
+    store: Store<Context>,
 }
 
 #[derive(Default)]
@@ -1317,28 +1319,19 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
     linker.instantiate_pre(module).unwrap()
 }
 
-fn run_script(req: &mut Request, engine: &Engine, instance_pre: &InstancePre<Context>) {
-    let instant = Instant::now();
+fn run_script(req: &mut Request, mut store: &mut Store<Context>, start: &TypedFunc<(), ()>) {
     let environs = req.params();
     let headers = String::new();
     let output = String::new();
     let mut input = String::new();
     req.stdin().read_to_string(&mut input).unwrap();
 
-    let mut store = Store::new(
-        engine,
-        Context {
-            headers,
-            input,
-            output,
-            environs,
-        },
-    );
-    let instance = instance_pre.instantiate(&mut store).unwrap();
-    let start = instance
-        .get_typed_func::<(), ()>(&mut store, "<start>")
-        .unwrap();
+    store.data_mut().headers = headers;
+    store.data_mut().environs = environs;
+    store.data_mut().input = input;
+    store.data_mut().output = output;
 
+    let instant = Instant::now();
     start.call(&mut store, ()).unwrap();
 
     if !store.data().headers.contains("Content-Type:") {
@@ -1375,7 +1368,7 @@ fn request(mut req: Request, engine: &Engine, scripts: &DashMap<String, Script>)
             return;
         };
 
-        let script = scripts.get(&path);
+        let script = scripts.get_mut(&path);
         if script.is_none()
             || script
                 .as_ref()
@@ -1432,17 +1425,36 @@ fn request(mut req: Request, engine: &Engine, scripts: &DashMap<String, Script>)
 
             let module = Module::from_binary(engine, &output).unwrap();
             let instance_pre = link_script(engine, &module);
-            run_script(&mut req, engine, &instance_pre);
+
+            let mut store = Store::new(
+                engine,
+                Context {
+                    headers: String::new(),
+                    input: String::new(),
+                    output: String::new(),
+                    environs: Arc::new(HashMap::new()),
+                },
+            );
+
+            let instance = instance_pre.instantiate(&mut store).unwrap();
+            let start = instance
+                .get_typed_func::<(), ()>(&mut store, "<start>")
+                .unwrap();
+
+            run_script(&mut req, &mut store, &start);
 
             let script = Script {
                 modified: metadata.modified().unwrap(),
-                instance_pre,
+                start,
+                store,
             };
 
             scripts.insert(path, script);
         } else {
-            let script = script.unwrap();
-            run_script(&mut req, engine, &script.instance_pre);
+            let mut script = script.unwrap();
+            let start = script.start.clone();
+
+            run_script(&mut req, &mut script.store, &start);
         }
     }));
 
