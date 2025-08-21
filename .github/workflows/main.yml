@@ -18,7 +18,7 @@ jobs:
 
       - name: Build
         run: |
-          cargo build --release
+          RUSTFLAGS='-C target-feature=+avx2' cargo build --release
           mv /home/ubuntu/Desktop/CGI/cyth-cgi /tmp/
           cp target/release/cyth-cgi /home/ubuntu/Desktop/CGI/
 
