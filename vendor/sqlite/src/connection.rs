@@ -42,11 +42,11 @@ impl Connection {
                 ffi::SQLITE_OK => {}
                 code => match crate::error::last(raw) {
                     Some(error) => {
-                        ffi::sqlite3_close(raw);
+                        ffi::sqlite3_close_v2(raw);
                         return Err(error);
                     }
                     _ => {
-                        ffi::sqlite3_close(raw);
+                        ffi::sqlite3_close_v2(raw);
                         return Err(crate::error::Error {
                             code: Some(code as isize),
                             message: None,
@@ -294,7 +294,7 @@ impl Drop for Connection {
     #[allow(unused_must_use)]
     fn drop(&mut self) {
         self.remove_busy_handler();
-        unsafe { ffi::sqlite3_close(self.raw.0) };
+        unsafe { ffi::sqlite3_close_v2(self.raw.0) };
     }
 }
 
