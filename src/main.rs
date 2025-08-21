@@ -1203,6 +1203,7 @@ fn request(
     scripts: &mut HashMap<String, Script>,
     imports: v8::Global<v8::Object>,
 ) {
+    let instant = Instant::now();
     let handle_scope = &mut v8::HandleScope::new(isolate);
     let context = v8::Context::new(handle_scope, Default::default());
     let scope = &mut v8::ContextScope::new(handle_scope, context);
@@ -1232,8 +1233,6 @@ fn request(
                 .modified
                 .ne(&metadata.modified().unwrap())
         {
-            let instant = Instant::now();
-
             let mut child = Command::new(args().nth(1).unwrap())
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -1307,7 +1306,6 @@ fn request(
 
             scripts.insert(path, script);
         } else {
-            let instant = Instant::now();
             let script = script.unwrap();
             let instance = v8::Local::new(scope, script.instance.clone());
             let module = v8::Local::new(scope, script.module.clone());
