@@ -667,6 +667,17 @@ where
         Err(e) => Err(e).unwrap(),
     };
     let handler = Arc::new(handler);
+
+    for _ in 0..num_cpus::get() - 1 {
+        match fork::fork() {
+            Ok(fork::Fork::Parent(child)) => {
+                break;
+            }
+            Ok(fork::Fork::Child) => println!("I'm a new child process"),
+            Err(_) => println!("Fork failed"),
+        }
+    }
+
     loop {
         let sock = match transport.accept() {
             Ok(sock) => sock,
@@ -679,18 +690,12 @@ where
             },
             None => true,
         };
+
         if allow {
             let handler = handler.clone();
-            thread::spawn(move || {
-                let sock = Rc::new(sock);
-                loop {
-                    let (request_id, role, keep_conn) = Request::begin(&sock).unwrap();
-                    handler(Request::new(sock.clone(), request_id, role).unwrap());
-                    if !keep_conn {
-                        break;
-                    }
-                }
-            });
+            let sock = Rc::new(sock);
+            let (request_id, role, keep_conn) = Request::begin(&sock).unwrap();
+            handler(Request::new(sock.clone(), request_id, role).unwrap());
         }
     }
 }
