@@ -6,9 +6,9 @@
 
 
 
-  int height = 500
+  int height = 100
 
-  int width = 500
+  int width = 100
 
 
 
@@ -111,7 +111,7 @@
         buffer.push('\n')
         buffer.push('\n')
       
-      printBuffer(buffer)
+      print(buffer.toString())
       ?>
 
   ];

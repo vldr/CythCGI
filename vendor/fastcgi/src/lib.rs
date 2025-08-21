@@ -53,12 +53,12 @@ use std::thread;
 #[cfg(unix)]
 use unix::{Socket, Transport};
 #[cfg(unix)]
-mod unix;
+pub mod unix;
 
 #[cfg(windows)]
 use windows::{Socket, Transport};
 #[cfg(windows)]
-mod windows;
+pub mod windows;
 
 const HEADER_LEN: usize = 8;
 
@@ -472,7 +472,7 @@ pub struct Request {
     sock: Rc<Socket>,
     id: u16,
     role: Role,
-    params: Arc<HashMap<String, String>>,
+    params: HashMap<String, String>,
     aborted: bool,
     status: i32,
     buf: Vec<u8>,
@@ -594,7 +594,7 @@ impl Request {
     }
 
     /// Iterates over the FastCGI parameters.
-    pub fn params(&self) -> Arc<HashMap<String, String>> {
+    pub fn params(&self) -> HashMap<String, String> {
         self.params.clone()
     }
 
@@ -657,32 +657,22 @@ impl Drop for Request {
     }
 }
 
-fn run_transport<F>(handler: F, transport: &mut Transport)
+fn run_transport<F>(mut handler: F, transport: &mut Transport)
 where
-    F: Fn(Request) + Send + Sync + 'static,
+    F: FnMut(Request),
 {
     let addrs: Option<HashSet<String>> = match std::env::var("FCGI_WEB_SERVER_ADDRS") {
         Ok(value) => Some(value.split(',').map(|s| s.to_owned()).collect()),
         Err(std::env::VarError::NotPresent) => None,
         Err(e) => Err(e).unwrap(),
     };
-    let handler = Arc::new(handler);
-
-    for _ in 0..num_cpus::get() - 1 {
-        match fork::fork() {
-            Ok(fork::Fork::Parent(child)) => {
-                break;
-            }
-            Ok(fork::Fork::Child) => println!("I'm a new child process"),
-            Err(_) => println!("Fork failed"),
-        }
-    }
 
     loop {
         let sock = match transport.accept() {
             Ok(sock) => sock,
             Err(e) => panic!(e.to_string()),
         };
+
         let allow = match addrs {
             Some(ref addrs) => match sock.peer() {
                 Ok(ref addr) => addrs.contains(addr),
@@ -692,52 +682,21 @@ where
         };
 
         if allow {
-            let handler = handler.clone();
             let sock = Rc::new(sock);
             let (request_id, role, keep_conn) = Request::begin(&sock).unwrap();
             handler(Request::new(sock.clone(), request_id, role).unwrap());
+
+            // if !keep_conn {
+            //     break;
+            // }
         }
     }
 }
 
-#[cfg(unix)]
 /// Runs as a FastCGI process with the given handler.
-///
-/// Available under Unix only. If you are using Windows, use `run_tcp` instead.
-pub fn run<F>(handler: F)
+pub fn run<F>(handler: F, mut transport: Transport)
 where
-    F: Fn(Request) + Send + Sync + 'static,
+    F: FnMut(Request),
 {
-    run_transport(handler, &mut Transport::new())
-}
-
-#[cfg(unix)]
-/// Accepts requests from a user-supplied raw file descriptor. IPv4, IPv6, and
-/// Unix domain sockets are supported.
-///
-/// Available under Unix only.
-pub fn run_raw<F>(handler: F, raw_fd: std::os::unix::io::RawFd)
-where
-    F: Fn(Request) + Send + Sync + 'static,
-{
-    run_transport(handler, &mut Transport::from_raw_fd(raw_fd))
-}
-
-#[cfg(unix)]
-/// Accepts requests from a user-supplied TCP listener.
-pub fn run_tcp<F>(handler: F, listener: &TcpListener)
-where
-    F: Fn(Request) + Send + Sync + 'static,
-{
-    use std::os::unix::io::AsRawFd;
-    run_transport(handler, &mut Transport::from_raw_fd(listener.as_raw_fd()))
-}
-
-#[cfg(windows)]
-/// Accepts requests from a user-supplied TCP listener.
-pub fn run_tcp<F>(handler: F, listener: &TcpListener)
-where
-    F: Fn(Request) + Send + Sync + 'static,
-{
-    run_transport(handler, &mut Transport::from_tcp(&listener))
+    run_transport(handler, &mut transport)
 }
