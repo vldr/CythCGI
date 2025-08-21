@@ -25,9 +25,9 @@ use sqlite::{Connection, ConnectionThreadSafe, State, Statement, Value};
 use uuid::Uuid;
 use wasmtime::{
     AnyRef, ArrayRef, ArrayRefPre, ArrayType, AsContext, AsContextMut, Caller, Config, Engine,
-    ExternRef, FieldType, HeapType, Instance, InstanceAllocationStrategy, InstancePre, Linker,
-    Module, Mutability, RefType, StorageType, Store, StructRef, StructRefPre, StructType,
-    TypedFunc, Val, ValType,
+    ExternRef, FieldType, HeapType, InstanceAllocationStrategy, InstancePre, Linker, Module,
+    Mutability, RefType, StorageType, Store, StructRef, StructRefPre, StructType, TypedFunc, Val,
+    ValType,
 };
 
 struct Script {
