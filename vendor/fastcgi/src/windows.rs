@@ -24,7 +24,7 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream, SocketAddr};
 
 pub struct Transport<'a> {
     inner: &'a TcpListener,
