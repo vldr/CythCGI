@@ -1185,15 +1185,14 @@ fn run_script(
             .push_str("Content-Type: text/html; charset=UTF-8\n");
     }
 
-    write!(
-        &mut req.stdout(),
-        "Interval: {:?}\n{}\n{}",
-        instant.elapsed(),
-        context.headers,
-        context.output
-    )
-    .unwrap_or(());
+    let mut result = String::with_capacity(context.headers.len() + context.output.len() + 1024);
+    result.push_str(&format!("Interval: {:?}", instant.elapsed()));
+    result.push('\n');
+    result.push_str(&context.headers);
+    result.push('\n');
+    result.push_str(&context.output);
 
+    req.stdout().write_all(result.as_bytes()).unwrap();
     scope.request_garbage_collection_for_testing(v8::GarbageCollectionType::Full);
 }
 
