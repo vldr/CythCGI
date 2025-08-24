@@ -11,3 +11,4 @@ keywords = ["fastcgi", "web", "server", "protocol", "cgi"]
 
 [dependencies]
 libc = "0.2.9"
+num_cpus = "1.17.0"
