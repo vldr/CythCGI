@@ -1494,7 +1494,6 @@ fn main() -> ExitCode {
         config.cranelift_flag_enable("has_sse41");
         config.cranelift_flag_enable("has_avx");
         config.cranelift_flag_enable("has_avx2");
-        config.cranelift_flag_enable("has_lzcnt");
     }
 
     let engine = Engine::new(&config).unwrap();
