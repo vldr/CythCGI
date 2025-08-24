@@ -1475,10 +1475,27 @@ fn main() -> ExitCode {
 
     let mut config = Config::new();
     config.wasm_gc(true);
+    config.parallel_compilation(true);
     config.collector(wasmtime::Collector::Null);
     config.wasm_reference_types(true);
     config.wasm_function_references(true);
+    config.signals_based_traps(true);
+    config.memory_init_cow(true);
     config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+
+    unsafe {
+        if let Err(error) = config.target("x86_64") {
+            eprintln!(
+                "Wasmtime was not compiled with the x86_64 backend for \
+                     Cranelift enabled: {error:?}",
+            );
+            return ExitCode::FAILURE;
+        }
+        config.cranelift_flag_enable("has_sse41");
+        config.cranelift_flag_enable("has_avx");
+        config.cranelift_flag_enable("has_avx2");
+        config.cranelift_flag_enable("has_lzcnt");
+    }
 
     let engine = Engine::new(&config).unwrap();
     let scripts = DashMap::<String, Script>::new();
