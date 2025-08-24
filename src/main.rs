@@ -1483,19 +1483,6 @@ fn main() -> ExitCode {
     config.memory_init_cow(true);
     config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
 
-    unsafe {
-        if let Err(error) = config.target("x86_64") {
-            eprintln!(
-                "Wasmtime was not compiled with the x86_64 backend for \
-                     Cranelift enabled: {error:?}",
-            );
-            return ExitCode::FAILURE;
-        }
-        config.cranelift_flag_enable("has_sse41");
-        config.cranelift_flag_enable("has_avx");
-        config.cranelift_flag_enable("has_lzcnt");
-    }
-
     let engine = Engine::new(&config).unwrap();
     let scripts = DashMap::<String, Script>::new();
 
