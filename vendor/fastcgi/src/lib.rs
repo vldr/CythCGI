@@ -662,7 +662,7 @@ where
     F: Fn(Request) + Send + Sync + 'static,
 {
     let handler = Arc::new(handler);
-    let cpus = 1; //num_cpus::get();
+    let cpus = num_cpus::get();
 
     for i in 0..cpus {
         let transport = transport.clone();
