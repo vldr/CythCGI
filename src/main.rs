@@ -1491,7 +1491,6 @@ fn main() -> ExitCode {
             );
             return ExitCode::FAILURE;
         }
-        config.cranelift_flag_enable("has_sse41");
         config.cranelift_flag_enable("has_avx2");
     }
 
