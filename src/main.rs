@@ -10,7 +10,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     process::{Command, ExitCode, Stdio},
     rc::Rc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use bcrypt::{DEFAULT_COST, hash, verify};
@@ -35,9 +35,13 @@ struct Script {
     text: Rc<Vec<String>>,
 }
 
+#[derive(Default)]
 struct Context {
+    input: String,
+    output: String,
+    headers: String,
     text: Rc<Vec<String>>,
-    request: Request,
+    environs: Rc<HashMap<String, String>>,
 }
 
 const IMPORTS: &str = "import \"env\"
@@ -620,12 +624,7 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 func_ty.ty().func().unwrap().clone(),
                 |mut caller, params, _results| {
                     let result = val_to_string(&mut caller, params.get(0).unwrap());
-                    caller
-                        .data_mut()
-                        .request
-                        .stdout()
-                        .write(result.as_bytes())
-                        .unwrap();
+                    caller.data_mut().output.push_str(&result);
 
                     Ok(())
                 },
@@ -641,14 +640,8 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 func_ty.ty().func().unwrap().clone(),
                 |mut caller, params, _results| {
                     let result = val_to_string(&mut caller, params.get(0).unwrap());
-
-                    caller
-                        .data_mut()
-                        .request
-                        .stdout()
-                        .write(result.as_bytes())
-                        .unwrap();
-                    caller.data_mut().request.stdout().write(&[b'\n']).unwrap();
+                    caller.data_mut().output.push_str(&result);
+                    caller.data_mut().output.push('\n');
 
                     Ok(())
                 },
@@ -665,13 +658,7 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 |mut caller, params, _results| {
                     let result = val_to_char_array(&mut caller, params.get(0).unwrap());
                     let result = unsafe { String::from_utf8_unchecked(result) };
-
-                    caller
-                        .data_mut()
-                        .request
-                        .stdout()
-                        .write(result.as_bytes())
-                        .unwrap();
+                    caller.data_mut().output.push_str(&result);
 
                     Ok(())
                 },
@@ -689,13 +676,7 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                     let result = params.get(0).unwrap().unwrap_i32();
                     let text = caller.data_mut().text.clone();
                     let text = &text[result as usize];
-
-                    caller
-                        .data_mut()
-                        .request
-                        .stdout()
-                        .write(text.as_bytes())
-                        .unwrap();
+                    caller.data_mut().output.push_str(text);
 
                     Ok(())
                 },
@@ -745,15 +726,11 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 "body",
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, _params, results| {
-                    let mut input = String::new();
-                    caller
-                        .data_mut()
-                        .request
-                        .stdin()
-                        .read_to_string(&mut input)
-                        .unwrap();
+                    let input = std::mem::take(&mut caller.data_mut().input);
+                    let body = string_to_val(&mut caller, &input);
 
-                    results[0] = string_to_val(&mut caller, &input);
+                    caller.data_mut().input = input;
+                    results[0] = body;
                     Ok(())
                 },
             )
@@ -836,7 +813,7 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 "query",
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, _params, results| {
-                    let environs = caller.data().request.params().clone();
+                    let environs = caller.data().environs.clone();
                     let default = String::new();
                     let value = environs.get("QUERY_STRING").unwrap_or(&default);
                     let body = string_to_val(&mut caller, &value);
@@ -856,14 +833,8 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, _results| {
                     let header = val_to_string(&mut caller, params.get(0).unwrap());
-
-                    caller
-                        .data_mut()
-                        .request
-                        .stdout()
-                        .write(header.trim().as_bytes())
-                        .unwrap();
-                    caller.data_mut().request.stdout().write(&[b'\n']).unwrap();
+                    caller.data_mut().headers.push_str(header.trim());
+                    caller.data_mut().headers.push('\n');
 
                     Ok(())
                 },
@@ -880,8 +851,11 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 move |mut caller, params, results| {
                     let name = val_to_string(&mut caller, params.get(0).unwrap());
                     let empty_string = "".to_owned();
-                    let cookie = caller.data().request.params();
-                    let cookie = cookie.get("HTTP_COOKIE").unwrap_or(&empty_string);
+                    let cookie = caller
+                        .data()
+                        .environs
+                        .get("HTTP_COOKIE")
+                        .unwrap_or(&empty_string);
 
                     if let Some(mut start) = cookie.find(&(name.clone() + "=")) {
                         start += name.len() + 1;
@@ -972,7 +946,7 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 "getEnviron",
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, results| {
-                    let environs = caller.data().request.params().clone();
+                    let environs = caller.data().environs.clone();
                     let key = val_to_string(&mut caller, params.get(0).unwrap());
                     let default = String::new();
                     let value = environs.get(&key).unwrap_or(&default);
@@ -991,7 +965,7 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 "getEnvirons",
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, _params, results| {
-                    let environs = caller.data().request.params().clone();
+                    let environs = caller.data().environs.clone();
                     let list: Vec<&String> = environs.keys().collect();
 
                     results[0] = string_array_to_val(&mut caller, &list);
@@ -1352,28 +1326,59 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
 }
 
 fn run_script(
-    request: Request,
+    req: &mut Request,
     engine: &Engine,
     instance_pre: &InstancePre<Context>,
     text: Rc<Vec<String>>,
 ) {
-    let mut store: Store<Context> = Store::new(engine, Context { request, text });
+    let instant = Instant::now();
+    let environs = req.params();
+    let headers = String::new();
+    let output = String::new();
+    let mut input = String::new();
+    req.stdin().read_to_string(&mut input).unwrap();
+
+    let mut store = Store::new(
+        engine,
+        Context {
+            headers,
+            input,
+            output,
+            text,
+            environs,
+        },
+    );
     let instance = instance_pre.instantiate(&mut store).unwrap();
     let start = instance.get_func(&mut store, "<start>").unwrap();
 
     unsafe { start.call_unchecked(&mut store, &mut *vec![]).unwrap() };
+
+    if !store.data().headers.contains("Content-Type:") {
+        store
+            .data_mut()
+            .headers
+            .push_str("Content-Type: text/html; charset=UTF-8\n");
+    }
+
+    write!(
+        &mut req.stdout(),
+        "Interval: {:?}\n{}\n{}",
+        instant.elapsed(),
+        store.data().headers,
+        store.data().output
+    )
+    .unwrap_or(());
 }
 
-fn request(mut request: Request, engine: &Engine, scripts: &mut HashMap<String, Script>) {
-    let mut request_panic = request.clone();
+fn request(mut req: Request, engine: &Engine, scripts: &mut HashMap<String, Script>) {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let Some(path) = request.param("SCRIPT_FILENAME") else {
+        let Some(path) = req.param("SCRIPT_FILENAME") else {
             panic!("Missing 'SCRIPT_FILENAME' environment variable")
         };
 
         let Ok(metadata) = fs::metadata(&path) else {
             write!(
-                &mut request.stdout(),
+                &mut req.stdout(),
                 "{}{}",
                 "Status: 404 Not Found\n",
                 "Content-Type: text/plain\n\n"
@@ -1438,7 +1443,7 @@ fn request(mut request: Request, engine: &Engine, scripts: &mut HashMap<String, 
             let module = Module::from_binary(engine, &output).unwrap();
             let instance_pre = link_script(engine, &module);
             let text = Rc::new(text);
-            run_script(request, engine, &instance_pre, text.clone());
+            run_script(&mut req, engine, &instance_pre, text.clone());
 
             let script = Script {
                 modified: metadata.modified().unwrap(),
@@ -1449,7 +1454,7 @@ fn request(mut request: Request, engine: &Engine, scripts: &mut HashMap<String, 
             scripts.insert(path, script);
         } else {
             let script = script.unwrap();
-            run_script(request, engine, &script.instance_pre, script.text.clone());
+            run_script(&mut req, engine, &script.instance_pre, script.text.clone());
         }
     }));
 
@@ -1463,7 +1468,7 @@ fn request(mut request: Request, engine: &Engine, scripts: &mut HashMap<String, 
         };
 
         write!(
-            &mut request_panic.stdout(),
+            &mut req.stdout(),
             "Status: 500 Internal Server Error\n\n{}",
             reason,
         )
