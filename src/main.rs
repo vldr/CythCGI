@@ -30,7 +30,7 @@ use wasmtime::{
 };
 
 struct Script {
-    modified: SystemTime,
+    // modified: SystemTime,
     instance_pre: InstancePre<Context>,
     text: Rc<Vec<String>>,
 }
@@ -1376,24 +1376,24 @@ fn request(mut req: Request, engine: &Engine, scripts: &mut HashMap<String, Scri
             panic!("Missing 'SCRIPT_FILENAME' environment variable")
         };
 
-        let Ok(metadata) = fs::metadata(&path) else {
-            write!(
-                &mut req.stdout(),
-                "{}{}",
-                "Status: 404 Not Found\n",
-                "Content-Type: text/plain\n\n"
-            )
-            .unwrap_or(());
-            return;
-        };
+        // let Ok(metadata) = fs::metadata(&path) else {
+        //     write!(
+        //         &mut req.stdout(),
+        //         "{}{}",
+        //         "Status: 404 Not Found\n",
+        //         "Content-Type: text/plain\n\n"
+        //     )
+        //     .unwrap_or(());
+        //     return;
+        // };
 
         let script = scripts.get(&path);
         if script.is_none()
-            || script
-                .as_ref()
-                .unwrap()
-                .modified
-                .ne(&metadata.modified().unwrap())
+        // || script
+        //     .as_ref()
+        //     .unwrap()
+        //     .modified
+        //     .ne(&metadata.modified().unwrap())
         {
             let mut child = Command::new(args().nth(1).unwrap())
                 .stdin(Stdio::piped())
@@ -1446,7 +1446,7 @@ fn request(mut req: Request, engine: &Engine, scripts: &mut HashMap<String, Scri
             run_script(&mut req, engine, &instance_pre, text.clone());
 
             let script = Script {
-                modified: metadata.modified().unwrap(),
+                // modified: metadata.modified().unwrap(),
                 instance_pre,
                 text,
             };
