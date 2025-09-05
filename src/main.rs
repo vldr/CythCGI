@@ -31,8 +31,8 @@ use wasmtime::{
 };
 
 struct Script {
-    modified: SystemTime,
-    instance_pre: InstancePre<Context>,
+    // modified: SystemTime,
+    // instance_pre: InstancePre<Context>,
 }
 
 #[derive(Default)]
@@ -1357,92 +1357,91 @@ fn run_script(req: &mut Request, engine: &Engine, instance_pre: &InstancePre<Con
     .unwrap_or(());
 }
 
-fn request(mut req: Request, engine: &Engine, scripts: &DashMap<String, Script>) {
+fn request(mut req: Request, engine: &Engine, _scripts: &DashMap<String, Script>) {
     let result = catch_unwind(AssertUnwindSafe(|| {
         let Some(path) = req.param("SCRIPT_FILENAME") else {
             panic!("Missing 'SCRIPT_FILENAME' environment variable")
         };
 
-        let Ok(metadata) = fs::metadata(&path) else {
-            write!(
-                &mut req.stdout(),
-                "{}{}",
-                "Status: 404 Not Found\n",
-                "Content-Type: text/plain\n\n"
-            )
-            .unwrap_or(());
-            return;
-        };
+        // let Ok(metadata) = fs::metadata(&path) else {
+        //     write!(
+        //         &mut req.stdout(),
+        //         "{}{}",
+        //         "Status: 404 Not Found\n",
+        //         "Content-Type: text/plain\n\n"
+        //     )
+        //     .unwrap_or(());
+        //     return;
+        // };
 
-        let script = scripts.get(&path);
-        if script.is_none()
-            || script
-                .as_ref()
-                .unwrap()
-                .modified
-                .ne(&metadata.modified().unwrap())
-        {
-            drop(script);
+        // let script = scripts.get(&path);
+        // if script.is_none()
+        //     || script
+        //         .as_ref()
+        //         .unwrap()
+        //         .modified
+        //         .ne(&metadata.modified().unwrap())
+        // {
+        //     drop(script);
 
-            let mut child = Command::new(args().nth(1).unwrap())
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap();
+        let mut child = Command::new(args().nth(1).unwrap())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
 
-            let mut stdin = child.stdin.take().unwrap();
-            let (input, mapping) = read_script(&path);
-            stdin.write_all(input.as_bytes()).unwrap();
-            drop(stdin);
+        let mut stdin = child.stdin.take().unwrap();
+        let (input, mapping) = read_script(&path);
+        stdin.write_all(input.as_bytes()).unwrap();
+        drop(stdin);
 
-            let status = child.wait_with_output().unwrap();
-            let output = status.stdout;
+        let status = child.wait_with_output().unwrap();
+        let output = status.stdout;
 
-            let errors = String::from_utf8_lossy(&status.stderr);
-            if !errors.is_empty() {
-                let re = Regex::new(r"\(null\):([0-9]+):([0-9]+)-([0-9]+):([0-9]+): error: (.*)")
-                    .unwrap();
+        let errors = String::from_utf8_lossy(&status.stderr);
+        if !errors.is_empty() {
+            let re =
+                Regex::new(r"\(null\):([0-9]+):([0-9]+)-([0-9]+):([0-9]+): error: (.*)").unwrap();
 
-                let mut result = String::new();
+            let mut result = String::new();
 
-                for caps in re.captures_iter(&errors) {
-                    let (_, [start_line, start_column, end_line, end_column, message]) =
-                        caps.extract();
+            for caps in re.captures_iter(&errors) {
+                let (_, [start_line, start_column, end_line, end_column, message]) = caps.extract();
 
-                    let start_line = start_line.parse::<usize>().unwrap();
-                    let start_column = start_column.parse::<i32>().unwrap();
-                    let end_line = end_line.parse::<usize>().unwrap();
-                    let end_column = end_column.parse::<i32>().unwrap();
+                let start_line = start_line.parse::<usize>().unwrap();
+                let start_column = start_column.parse::<i32>().unwrap();
+                let end_line = end_line.parse::<usize>().unwrap();
+                let end_column = end_column.parse::<i32>().unwrap();
 
-                    result.push_str(&format!(
-                        "{}:{}:{}-{}:{}: {}\n",
-                        path,
-                        mapping[start_line - 1].0,
-                        mapping[start_line - 1].1 + start_column,
-                        mapping[end_line - 1].0,
-                        mapping[end_line - 1].1 + end_column,
-                        message
-                    ));
-                }
-
-                panic!("{}", result);
+                result.push_str(&format!(
+                    "{}:{}:{}-{}:{}: {}\n",
+                    path,
+                    mapping[start_line - 1].0,
+                    mapping[start_line - 1].1 + start_column,
+                    mapping[end_line - 1].0,
+                    mapping[end_line - 1].1 + end_column,
+                    message
+                ));
             }
 
-            let module = Module::from_binary(engine, &output).unwrap();
-            let instance_pre = link_script(engine, &module);
-            run_script(&mut req, engine, &instance_pre);
-
-            let script = Script {
-                modified: metadata.modified().unwrap(),
-                instance_pre,
-            };
-
-            scripts.insert(path, script);
-        } else {
-            let script = script.unwrap();
-            run_script(&mut req, engine, &script.instance_pre);
+            panic!("{}", result);
         }
+
+        let module = Module::from_binary(engine, &output).unwrap();
+        let instance_pre = link_script(engine, &module);
+        run_script(&mut req, engine, &instance_pre);
+
+        // let script = Script {
+        //     modified: metadata.modified().unwrap(),
+        //     instance_pre,
+        // };
+
+        // scripts.insert(path, script);
+        // } else {
+        //     let script = script.unwrap();
+        //     run_script(&mut req, engine, &script.instance_pre);
+        // }
     }));
 
     if let Err(error) = result {
