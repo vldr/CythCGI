@@ -468,6 +468,7 @@ writer!(Stderr);
 /// The Request API is designed to be an abstraction of the traditional CGI
 /// process model. Note that this API is low level. Dealing with things like
 /// GET/POST parameters or cookies is outside the scope of this library.
+#[derive(Clone)]
 pub struct Request {
     sock: Rc<Socket>,
     id: u16,
