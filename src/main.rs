@@ -9,7 +9,7 @@ use std::{
     net::TcpListener,
     panic::{AssertUnwindSafe, catch_unwind},
     process::{Command, ExitCode, Stdio},
-    sync::Arc,
+    rc::Rc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -19,7 +19,6 @@ use markdown::{CompileOptions, Options};
 use percent_encoding::NON_ALPHANUMERIC;
 use regex::Regex;
 
-use dashmap::DashMap;
 use fastcgi::Request;
 use sqlite::{Connection, ConnectionThreadSafe, State, Statement, Value};
 use uuid::Uuid;
@@ -31,8 +30,9 @@ use wasmtime::{
 };
 
 struct Script {
-    // modified: SystemTime,
-    // instance_pre: InstancePre<Context>,
+    modified: SystemTime,
+    instance_pre: InstancePre<Context>,
+    text: Rc<Vec<String>>,
 }
 
 #[derive(Default)]
@@ -40,13 +40,15 @@ struct Context {
     input: String,
     output: String,
     headers: String,
-    environs: Arc<HashMap<String, String>>,
+    text: Rc<Vec<String>>,
+    environs: Rc<HashMap<String, String>>,
 }
 
 const IMPORTS: &str = "import \"env\"
     void print(string a)
     void println(string a)
     void printBuffer(char[] a)
+    void printInternal(int index)
 
     string urlEncode(string a)
     string urlDecode(string a)
@@ -496,7 +498,7 @@ fn string_to_val(caller: &mut Caller<'_, Context>, string: &str) -> Val {
     Val::AnyRef(Some(array.to_anyref()))
 }
 
-fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
+fn read_script(path: &String) -> (String, Vec<String>, Vec<(i32, i32)>) {
     fn dedent(
         input: &str,
         mapping: &mut Vec<(i32, i32)>,
@@ -540,6 +542,7 @@ fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
     output += IMPORTS;
 
     let mut code = false;
+    let mut text = Vec::<String>::new();
     let mut mapping = Vec::<(i32, i32)>::new();
     let mut line = 1;
     let mut column = 1;
@@ -551,14 +554,6 @@ fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
     let mut start = 0;
     let mut start_line = 1;
     let mut start_column = 1;
-
-    fn hex_from_digit(num: u8) -> char {
-        if num < 10 {
-            (b'0' + num) as char
-        } else {
-            (b'A' + num - 10) as char
-        }
-    }
 
     for i in 0..input.len() {
         if input.as_bytes()[i] == b'\n' {
@@ -582,15 +577,12 @@ fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
             if input.as_bytes()[i] == b'<' && i + 1 < input.len() && input.as_bytes()[i + 1] == b'?'
             {
                 if start < i {
-                    mapping.push((start_line, start_column - 1));
+                    output += "printInternal(";
+                    output += &text.len().to_string();
+                    output += ")\n";
 
-                    output += "print(\"";
-                    for c in &input.as_bytes()[start..i] {
-                        output += "\\x";
-                        output.push(hex_from_digit(c / 16));
-                        output.push(hex_from_digit(c % 16));
-                    }
-                    output += "\")\n";
+                    mapping.push((start_line, start_column - 1));
+                    text.push(input[start..i].to_owned());
                 }
 
                 start_column = column + 1;
@@ -605,15 +597,12 @@ fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
         output += &dedent(&input[start..], &mut mapping, start_line, start_column);
     } else {
         if start < input.len() {
-            mapping.push((start_line, start_column - 1));
+            output += "printInternal(";
+            output += &text.len().to_string();
+            output += ")\n";
 
-            output += "print(\"";
-            for c in &input.as_bytes()[start..] {
-                output += "\\x";
-                output.push(hex_from_digit(c / 16));
-                output.push(hex_from_digit(c % 16));
-            }
-            output += "\")\n";
+            mapping.push((start_line, start_column - 1));
+            text.push(input[start..].to_owned());
         }
     }
 
@@ -621,7 +610,7 @@ fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
 
     mapping.push((line, column - 1));
 
-    (output, mapping)
+    (output, text, mapping)
 }
 
 fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
@@ -670,6 +659,24 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                     let result = val_to_char_array(&mut caller, params.get(0).unwrap());
                     let result = unsafe { String::from_utf8_unchecked(result) };
                     caller.data_mut().output.push_str(&result);
+
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    if let Some(func_ty) = module.imports().find(|func| func.name() == "printInternal") {
+        linker
+            .func_new(
+                "env",
+                "printInternal",
+                func_ty.ty().func().unwrap().clone(),
+                |mut caller, params, _results| {
+                    let result = params.get(0).unwrap().unwrap_i32();
+                    let text = caller.data_mut().text.clone();
+                    let text = &text[result as usize];
+                    caller.data_mut().output.push_str(text);
 
                     Ok(())
                 },
@@ -1318,7 +1325,12 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
     linker.instantiate_pre(module).unwrap()
 }
 
-fn run_script(req: &mut Request, engine: &Engine, instance_pre: &InstancePre<Context>) {
+fn run_script(
+    req: &mut Request,
+    engine: &Engine,
+    instance_pre: &InstancePre<Context>,
+    text: Rc<Vec<String>>,
+) {
     let instant = Instant::now();
     let environs = req.params();
     let headers = String::new();
@@ -1332,6 +1344,7 @@ fn run_script(req: &mut Request, engine: &Engine, instance_pre: &InstancePre<Con
             headers,
             input,
             output,
+            text,
             environs,
         },
     );
@@ -1357,91 +1370,92 @@ fn run_script(req: &mut Request, engine: &Engine, instance_pre: &InstancePre<Con
     .unwrap_or(());
 }
 
-fn request(mut req: Request, engine: &Engine, _scripts: &DashMap<String, Script>) {
+fn request(mut req: Request, engine: &Engine, scripts: &mut HashMap<String, Script>) {
     let result = catch_unwind(AssertUnwindSafe(|| {
         let Some(path) = req.param("SCRIPT_FILENAME") else {
             panic!("Missing 'SCRIPT_FILENAME' environment variable")
         };
 
-        // let Ok(metadata) = fs::metadata(&path) else {
-        //     write!(
-        //         &mut req.stdout(),
-        //         "{}{}",
-        //         "Status: 404 Not Found\n",
-        //         "Content-Type: text/plain\n\n"
-        //     )
-        //     .unwrap_or(());
-        //     return;
-        // };
+        let Ok(metadata) = fs::metadata(&path) else {
+            write!(
+                &mut req.stdout(),
+                "{}{}",
+                "Status: 404 Not Found\n",
+                "Content-Type: text/plain\n\n"
+            )
+            .unwrap_or(());
+            return;
+        };
 
-        // let script = scripts.get(&path);
-        // if script.is_none()
-        //     || script
-        //         .as_ref()
-        //         .unwrap()
-        //         .modified
-        //         .ne(&metadata.modified().unwrap())
-        // {
-        //     drop(script);
+        let script = scripts.get(&path);
+        if script.is_none()
+            || script
+                .as_ref()
+                .unwrap()
+                .modified
+                .ne(&metadata.modified().unwrap())
+        {
+            let mut child = Command::new(args().nth(1).unwrap())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
 
-        let mut child = Command::new(args().nth(1).unwrap())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+            let mut stdin = child.stdin.take().unwrap();
+            let (input, text, mapping) = read_script(&path);
+            stdin.write_all(input.as_bytes()).unwrap();
+            drop(stdin);
 
-        let mut stdin = child.stdin.take().unwrap();
-        let (input, mapping) = read_script(&path);
-        stdin.write_all(input.as_bytes()).unwrap();
-        drop(stdin);
+            let status = child.wait_with_output().unwrap();
+            let output = status.stdout;
 
-        let status = child.wait_with_output().unwrap();
-        let output = status.stdout;
+            let errors = String::from_utf8_lossy(&status.stderr);
+            if !errors.is_empty() {
+                let re = Regex::new(r"\(null\):([0-9]+):([0-9]+)-([0-9]+):([0-9]+): error: (.*)")
+                    .unwrap();
 
-        let errors = String::from_utf8_lossy(&status.stderr);
-        if !errors.is_empty() {
-            let re =
-                Regex::new(r"\(null\):([0-9]+):([0-9]+)-([0-9]+):([0-9]+): error: (.*)").unwrap();
+                let mut result = String::new();
 
-            let mut result = String::new();
+                for caps in re.captures_iter(&errors) {
+                    let (_, [start_line, start_column, end_line, end_column, message]) =
+                        caps.extract();
 
-            for caps in re.captures_iter(&errors) {
-                let (_, [start_line, start_column, end_line, end_column, message]) = caps.extract();
+                    let start_line = start_line.parse::<usize>().unwrap();
+                    let start_column = start_column.parse::<i32>().unwrap();
+                    let end_line = end_line.parse::<usize>().unwrap();
+                    let end_column = end_column.parse::<i32>().unwrap();
 
-                let start_line = start_line.parse::<usize>().unwrap();
-                let start_column = start_column.parse::<i32>().unwrap();
-                let end_line = end_line.parse::<usize>().unwrap();
-                let end_column = end_column.parse::<i32>().unwrap();
+                    result.push_str(&format!(
+                        "{}:{}:{}-{}:{}: {}\n",
+                        path,
+                        mapping[start_line - 1].0,
+                        mapping[start_line - 1].1 + start_column,
+                        mapping[end_line - 1].0,
+                        mapping[end_line - 1].1 + end_column,
+                        message
+                    ));
+                }
 
-                result.push_str(&format!(
-                    "{}:{}:{}-{}:{}: {}\n",
-                    path,
-                    mapping[start_line - 1].0,
-                    mapping[start_line - 1].1 + start_column,
-                    mapping[end_line - 1].0,
-                    mapping[end_line - 1].1 + end_column,
-                    message
-                ));
+                panic!("{}", result);
             }
 
-            panic!("{}", result);
+            let module = Module::from_binary(engine, &output).unwrap();
+            let instance_pre = link_script(engine, &module);
+            let text = Rc::new(text);
+            run_script(&mut req, engine, &instance_pre, text.clone());
+
+            let script = Script {
+                modified: metadata.modified().unwrap(),
+                instance_pre,
+                text,
+            };
+
+            scripts.insert(path, script);
+        } else {
+            let script = script.unwrap();
+            run_script(&mut req, engine, &script.instance_pre, script.text.clone());
         }
-
-        let module = Module::from_binary(engine, &output).unwrap();
-        let instance_pre = link_script(engine, &module);
-        run_script(&mut req, engine, &instance_pre);
-
-        // let script = Script {
-        //     modified: metadata.modified().unwrap(),
-        //     instance_pre,
-        // };
-
-        // scripts.insert(path, script);
-        // } else {
-        //     let script = script.unwrap();
-        //     run_script(&mut req, engine, &script.instance_pre);
-        // }
     }));
 
     if let Err(error) = result {
@@ -1480,23 +1494,17 @@ fn main() -> ExitCode {
     config.wasm_function_references(true);
     config.signals_based_traps(true);
     config.memory_init_cow(true);
+    config.macos_use_mach_ports(false);
     config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
 
     let engine = Engine::new(&config).unwrap();
-    let scripts = DashMap::<String, Script>::new();
+    let mut scripts = HashMap::<String, Script>::new();
 
     if env::args().count() > 2 {
         let listener = TcpListener::bind(args().nth(2).unwrap()).unwrap();
-        fastcgi::run_tcp(move |req| request(req, &engine, &scripts), &listener);
+        fastcgi::run_tcp(move |req| request(req, &engine, &mut scripts), &listener);
     } else {
-        #[cfg(unix)]
-        {
-            fastcgi::run(move |req| request(req, &engine, &scripts));
-        }
-        #[cfg(not(unix))]
-        {
-            panic!("Unix sockets are not supported on this platform");
-        }
+        fastcgi::run(move |req| request(req, &engine, &mut scripts));
     }
 
     ExitCode::SUCCESS
