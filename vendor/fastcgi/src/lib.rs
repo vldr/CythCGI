@@ -662,6 +662,7 @@ fn run_transport<F>(mut handler: F, transport: &mut Transport)
 where
     F: FnMut(Request),
 {
+    #[cfg(unix)]
     for i in 0..num_cpus::get() - 1 {
         match fork::fork() {
             Ok(fork::Fork::Parent(child)) => {
@@ -719,4 +720,13 @@ where
 {
     use std::os::unix::io::AsRawFd;
     run_transport(handler, &mut Transport::from_raw_fd(listener.as_raw_fd()))
+}
+
+#[cfg(windows)]
+/// Accepts requests from a user-supplied TCP listener.
+pub fn run_tcp<F>(handler: F, listener: &TcpListener)
+where
+    F: FnMut(Request),
+{
+    run_transport(handler, &mut Transport::from_tcp(&listener))
 }

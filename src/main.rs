@@ -1504,7 +1504,14 @@ fn main() -> ExitCode {
         let listener = TcpListener::bind(args().nth(2).unwrap()).unwrap();
         fastcgi::run_tcp(move |req| request(req, &engine, &mut scripts), &listener);
     } else {
+        #[cfg(unix)]
         fastcgi::run(move |req| request(req, &engine, &mut scripts));
+
+        #[cfg(windows)]
+        {
+            println!("error: unix sockets are not supported on this platform");
+            return ExitCode::FAILURE;
+        }
     }
 
     ExitCode::SUCCESS
