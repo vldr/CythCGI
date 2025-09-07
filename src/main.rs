@@ -25,8 +25,8 @@ use uuid::Uuid;
 use wasmtime::{
     AnyRef, ArrayRef, ArrayRefPre, ArrayType, AsContext, AsContextMut, Caller, Config, Engine,
     ExternRef, FieldType, HeapType, InstanceAllocationStrategy, InstancePre, Linker, Module,
-    Mutability, PoolingAllocationConfig, RefType, StorageType, Store, StoreContextMut, StructRef,
-    StructRefPre, StructType, Val, ValType,
+    Mutability, PoolingAllocationConfig, RefType, StorageType, Store, StructRef, StructRefPre,
+    StructType, Val, ValType,
 };
 
 struct Script {
@@ -416,28 +416,6 @@ fn val_to_char_array(caller: &mut Caller<'_, Context>, val: &Val) -> Vec<u8> {
     result
 }
 
-fn val_to_char_array_callback<F>(caller: &mut Caller<'_, Context>, val: &Val, callback: F)
-where
-    F: Fn(char, StoreContextMut<'_, Context>),
-{
-    let class = val.unwrap_any_ref().unwrap();
-    let class = class.unwrap_struct(caller.as_context()).unwrap();
-
-    let size = class.field(caller.as_context_mut(), 1).unwrap();
-    let size = size.unwrap_i32();
-
-    let array = class.field(caller.as_context_mut(), 0).unwrap();
-    let array = array.unwrap_any_ref().unwrap();
-    let array = array.as_array(caller.as_context()).unwrap().unwrap();
-
-    for i in 0..size {
-        let elem = array.get(caller.as_context_mut(), i as u32).unwrap();
-        let ch = elem.unwrap_i32() as u8 as char;
-
-        callback(ch, caller.as_context_mut());
-    }
-}
-
 fn char_array_to_val(caller: &mut Caller<'_, Context>, buf: Vec<u8>) -> Val {
     let array_ty = ArrayType::new(
         caller.engine(),
@@ -484,22 +462,6 @@ fn val_to_string(caller: &mut Caller<'_, Context>, val: &Val) -> String {
     }
 
     unsafe { String::from_utf8_unchecked(result) }
-}
-
-fn val_to_string_callback<F>(caller: &mut Caller<'_, Context>, val: &Val, callback: F)
-where
-    F: Fn(char, StoreContextMut<'_, Context>),
-{
-    let array = val.unwrap_any_ref().unwrap();
-    let array = array.as_array(caller.as_context()).unwrap().unwrap();
-
-    let len = array.len(caller.as_context()).unwrap();
-    for i in 0..len {
-        let elem = array.get(caller.as_context_mut(), i).unwrap();
-        let ch = elem.unwrap_i32() as u8 as char;
-
-        callback(ch, caller.as_context_mut());
-    }
 }
 
 fn val_to_externref<'a, T: 'static>(
@@ -661,13 +623,8 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 "print",
                 func_ty.ty().func().unwrap().clone(),
                 |mut caller, params, _results| {
-                    val_to_string_callback(
-                        &mut caller,
-                        params.get(0).unwrap(),
-                        |ch, mut context| {
-                            context.data_mut().output.push(ch);
-                        },
-                    );
+                    let result = val_to_string(&mut caller, params.get(0).unwrap());
+                    caller.data_mut().output.push_str(&result);
 
                     Ok(())
                 },
@@ -682,13 +639,8 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 "println",
                 func_ty.ty().func().unwrap().clone(),
                 |mut caller, params, _results| {
-                    val_to_string_callback(
-                        &mut caller,
-                        params.get(0).unwrap(),
-                        |ch, mut context| {
-                            context.data_mut().output.push(ch);
-                        },
-                    );
+                    let result = val_to_string(&mut caller, params.get(0).unwrap());
+                    caller.data_mut().output.push_str(&result);
                     caller.data_mut().output.push('\n');
 
                     Ok(())
@@ -704,13 +656,9 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 "printBuffer",
                 func_ty.ty().func().unwrap().clone(),
                 |mut caller, params, _results| {
-                    val_to_char_array_callback(
-                        &mut caller,
-                        params.get(0).unwrap(),
-                        |ch, mut context| {
-                            context.data_mut().output.push(ch);
-                        },
-                    );
+                    let result = val_to_char_array(&mut caller, params.get(0).unwrap());
+                    let result = unsafe { String::from_utf8_unchecked(result) };
+                    caller.data_mut().output.push_str(&result);
 
                     Ok(())
                 },
