@@ -77,6 +77,7 @@ const IMPORTS: &str = "import \"env\"
     bool sqliteBindNull(any a, int b)
     bool sqliteNext(any a)
     bool sqliteReadNull(any a, string b)
+    void sqlitePrint(any a, string b)
     T sqliteRead<T>(any a, string b)
 
 int stringIndexOf(string s, string target)
@@ -218,6 +219,9 @@ class Statement
 
     void __init__(any stmt)
         this.stmt = stmt
+
+    void print(string column)
+        sqlitePrint(stmt, column)
 
     T read<T>(string column)
         return sqliteRead<T>(stmt, column)
@@ -1245,6 +1249,26 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
             .unwrap();
     }
 
+    if let Some(func_ty) = module.imports().find(|func| func.name() == "sqlitePrint") {
+        linker
+            .func_new(
+                "env",
+                "sqlitePrint",
+                func_ty.ty().func().unwrap().clone(),
+                move |mut caller, params, _results| {
+                    let value = val_to_string(&mut caller, params.get(1).unwrap());
+                    let statement: &mut Statement =
+                        val_to_externref(&mut caller, params.get(0).unwrap());
+                    let result: String = statement.read(value.as_str()).unwrap_or_default();
+
+                    caller.data_mut().output.push_str(&result);
+
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
     if let Some(func_ty) = module
         .imports()
         .find(|func| func.name() == "sqliteRead<string>")
@@ -1400,8 +1424,9 @@ fn run_script(
 
     write!(
         &mut req.stdout(),
-        "Interval: {:?}\n{}\n{}",
+        "Interval: {:?}\nContent-Length: {}\n{}\n{}",
         instant.elapsed(),
+        store.data().output.len(),
         store.data().headers,
         store.data().output
     )
