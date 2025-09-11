@@ -493,22 +493,6 @@ fn val_to_string(caller: &mut Caller<'_, Context>, val: &Val) -> String {
     unsafe { String::from_utf8_unchecked(result) }
 }
 
-fn val_to_string_and_ouput(caller: &mut Caller<'_, Context>, val: &Val) {
-    let array = val.unwrap_any_ref().unwrap();
-    let array = array.as_array(caller.as_context()).unwrap().unwrap();
-
-    let len = array.len(caller.as_context()).unwrap();
-
-    let mut output = std::mem::take(&mut caller.data_mut().output);
-    output.reserve(len as usize);
-
-    for elem in array.elems(caller.as_context_mut()).unwrap() {
-        output.push(elem.unwrap_i32() as u8 as char);
-    }
-
-    caller.data_mut().output = output;
-}
-
 fn val_to_externref<'a, T: 'static>(
     caller: &'a mut Caller<'_, Context>,
     val: &'a Val,
@@ -668,7 +652,8 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 "print",
                 func_ty.ty().func().unwrap().clone(),
                 |mut caller: Caller<'_, Context>, params, _results| {
-                    val_to_string_and_ouput(&mut caller, params.get(0).unwrap());
+                    let output = val_to_string(&mut caller, params.get(0).unwrap());
+                    caller.data_mut().output.push_str(&output);
 
                     Ok(())
                 },
@@ -683,8 +668,8 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 "println",
                 func_ty.ty().func().unwrap().clone(),
                 |mut caller, params, _results| {
-                    val_to_string_and_ouput(&mut caller, params.get(0).unwrap());
-
+                    let output = val_to_string(&mut caller, params.get(0).unwrap());
+                    caller.data_mut().output.push_str(&output);
                     caller.data_mut().output.push('\n');
 
                     Ok(())
