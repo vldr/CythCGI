@@ -16,13 +16,14 @@ bool result = connection.execute("
 println("Insertion: " + result)
 
 Statement stmt = connection.prepare("INSERT INTO users(name, age, data) VALUES (?, ?, ?)")
-stmt.bind<string>(1, "Frank")
-stmt.bind<int>(2, 42)
-stmt.bind<char[]>(3, ['a', 'b'])
+stmt.bind(1, "Frank")
+stmt.bind(2, 42)
+stmt.bind(3, (char[]) ['a', 'b'])
+stmt.bind(4)
 stmt.next()
 
 stmt = connection.prepare("SELECT * FROM users WHERE age = ?")
-stmt.bind<int>(1, 42)
+stmt.bind(1, 42)
 
 while stmt.next()
   print(stmt.read<string>("name") + "\n")

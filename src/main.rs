@@ -229,10 +229,19 @@ class Statement
     bool readNull(string column)
         return sqliteReadNull(stmt, column)
 
-    bool bind<T>(int index, T value)
-        return sqliteBind<T>(stmt, index, value)
+    bool bind(int index, int value)
+        return sqliteBind<int>(stmt, index, value)
+
+    bool bind(int index, float value)
+        return sqliteBind<float>(stmt, index, value)
+
+    bool bind(int index, string value)
+        return sqliteBind<string>(stmt, index, value)
     
-    bool bindNull(int index)
+    bool bind(int index, char[] value)
+        return sqliteBind<char[]>(stmt, index, value)
+    
+    bool bind(int index)
         return sqliteBindNull(stmt, index)
 
     bool next()
