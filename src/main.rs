@@ -23,16 +23,16 @@ use fastcgi::Request;
 use sqlite::{Connection, ConnectionThreadSafe, State, Statement, Value};
 use uuid::Uuid;
 use wasmtime::{
-    AnyRef, ArrayRef, ArrayRefPre, ArrayType, AsContext, AsContextMut, Caller, Config, Engine,
-    ExternRef, FieldType, HeapType, InstanceAllocationStrategy, InstancePre, Linker, Module,
-    Mutability, PoolingAllocationConfig, RefType, StorageType, Store, StructRef, StructRefPre,
-    StructType, Val, ValType,
+    ArrayRef, ArrayRefPre, ArrayType, AsContext, AsContextMut, Caller, Config, Engine, FieldType,
+    Func, HeapType, InstancePre, Linker, Module, Mutability, RefType, StorageType, Store,
+    StructRef, StructRefPre, StructType, Val, ValType,
 };
 
 struct Script {
     modified: SystemTime,
-    instance_pre: InstancePre<Context>,
     text: Rc<Vec<String>>,
+    store: Store<Context>,
+    start: Func,
 }
 
 #[derive(Default)]
@@ -42,6 +42,8 @@ struct Context {
     headers: String,
     text: Rc<Vec<String>>,
     environs: Rc<HashMap<String, String>>,
+    connections: Vec<ConnectionThreadSafe>,
+    statements: Vec<Statement>,
 }
 
 const IMPORTS: &str = "import \"env\"
@@ -70,15 +72,15 @@ const IMPORTS: &str = "import \"env\"
     string date(int a, string b)
     int now()
 
-    any sqliteOpen(string a)
-    bool sqliteExecute(any a, string b)
-    any sqlitePrepare(any a, string b)
-    bool sqliteBind<T>(any a, int b, T c)
-    bool sqliteBindNull(any a, int b)
-    bool sqliteNext(any a)
-    bool sqliteReadNull(any a, string b)
-    void sqlitePrint(any a, string b)
-    T sqliteRead<T>(any a, string b)
+    int sqliteOpen(string a)
+    bool sqliteExecute(int a, string b)
+    int sqlitePrepare(int a, string b)
+    bool sqliteBind<T>(int a, int b, T c)
+    bool sqliteBindNull(int a, int b)
+    bool sqliteNext(int a)
+    bool sqliteReadNull(int a, string b)
+    void sqlitePrint(int a, string b)
+    T sqliteRead<T>(int a, string b)
 
 int stringIndexOf(string s, string target)
     if target.length == 0
@@ -199,13 +201,13 @@ int parseInt(string n, int base)
     return value
 
 class Database
-    any con
+    int con
 
     void __init__(string path)
         this.con = sqliteOpen(path)
 
     Statement prepare(string query)
-        any stmt = sqlitePrepare(con, query)
+        int stmt = sqlitePrepare(con, query)
         if stmt
             return Statement(stmt)
 
@@ -215,9 +217,9 @@ class Database
         return sqliteExecute(con, a)
 
 class Statement
-    any stmt
+    int stmt
 
-    void __init__(any stmt)
+    void __init__(int stmt)
         this.stmt = stmt
 
     void print(string column)
@@ -500,22 +502,6 @@ fn val_to_string(caller: &mut Caller<'_, Context>, val: &Val) -> String {
     }
 
     unsafe { String::from_utf8_unchecked(result) }
-}
-
-fn val_to_externref<'a, T: 'static>(
-    caller: &'a mut Caller<'_, Context>,
-    val: &'a Val,
-) -> &'a mut T {
-    let any_ref = val.unwrap_any_ref().unwrap();
-    let extern_ref = ExternRef::convert_any(caller.as_context_mut(), *any_ref).unwrap();
-    let data = extern_ref
-        .data_mut(caller.as_context_mut())
-        .unwrap()
-        .unwrap();
-
-    let data = data.downcast_mut::<T>().unwrap();
-
-    data
 }
 
 fn string_to_val(caller: &mut Caller<'_, Context>, string: &str) -> Val {
@@ -1022,14 +1008,12 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                     let connection = Connection::open_thread_safe(path);
 
                     if connection.is_err() {
-                        results[0] = Val::null_any_ref();
+                        results[0] = Val::I32(0);
                     } else {
-                        let extern_ref =
-                            ExternRef::new(caller.as_context_mut(), connection.unwrap()).unwrap();
-                        let any_ref =
-                            AnyRef::convert_extern(caller.as_context_mut(), extern_ref).unwrap();
+                        caller.data_mut().connections.push(connection.unwrap());
+                        let id = caller.data().connections.len();
 
-                        results[0] = Val::AnyRef(Some(any_ref));
+                        results[0] = Val::I32(id as i32);
                     }
 
                     Ok(())
@@ -1046,8 +1030,8 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, results| {
                     let query = val_to_string(&mut caller, params.get(1).unwrap());
-                    let connection: &ConnectionThreadSafe =
-                        val_to_externref(&mut caller, params.get(0).unwrap());
+                    let id = params.get(0).unwrap().unwrap_i32() as usize;
+                    let connection = &caller.data_mut().connections[id - 1];
                     let result = connection.execute(&query);
 
                     results[0] = Val::I32(result.is_ok().into());
@@ -1066,20 +1050,17 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller: Caller<'_, Context>, params, results| {
                     let query = val_to_string(&mut caller, params.get(1).unwrap());
-                    let connection: &ConnectionThreadSafe =
-                        val_to_externref(&mut caller, params.get(0).unwrap());
-
+                    let id = params.get(0).unwrap().unwrap_i32() as usize;
+                    let connection = &mut caller.data_mut().connections[id - 1];
                     let statement = connection.prepare(query);
 
                     if statement.is_err() {
-                        results[0] = Val::null_any_ref();
+                        results[0] = Val::I32(0);
                     } else {
-                        let extern_ref =
-                            ExternRef::new(caller.as_context_mut(), statement.unwrap()).unwrap();
-                        let any_ref =
-                            AnyRef::convert_extern(caller.as_context_mut(), extern_ref).unwrap();
+                        caller.data_mut().statements.push(statement.unwrap());
 
-                        results[0] = Val::AnyRef(Some(any_ref));
+                        let id = caller.data().statements.len();
+                        results[0] = Val::I32(id as i32);
                     }
 
                     Ok(())
@@ -1100,8 +1081,8 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 move |mut caller, params, results| {
                     let index = params.get(1).unwrap().unwrap_i32();
                     let value = val_to_string(&mut caller, params.get(2).unwrap());
-                    let statement: &mut Statement =
-                        val_to_externref(&mut caller, params.get(0).unwrap());
+                    let id = params.get(0).unwrap().unwrap_i32() as usize;
+                    let statement = &mut caller.data_mut().statements[id - 1];
 
                     let result = statement.bind((index as usize, value.as_str()));
 
@@ -1125,8 +1106,8 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 move |mut caller, params, results| {
                     let index = params.get(1).unwrap().unwrap_i32();
                     let value = params.get(2).unwrap().unwrap_i32();
-                    let statement: &mut Statement =
-                        val_to_externref(&mut caller, params.get(0).unwrap());
+                    let id = params.get(0).unwrap().unwrap_i32() as usize;
+                    let statement = &mut caller.data_mut().statements[id - 1];
 
                     let result = statement.bind((index as usize, value as i64));
 
@@ -1150,8 +1131,8 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 move |mut caller, params, results| {
                     let index = params.get(1).unwrap().unwrap_i32();
                     let value = params.get(2).unwrap().unwrap_f32();
-                    let statement: &mut Statement =
-                        val_to_externref(&mut caller, params.get(0).unwrap());
+                    let id = params.get(0).unwrap().unwrap_i32() as usize;
+                    let statement = &mut caller.data_mut().statements[id - 1];
 
                     let result = statement.bind((index as usize, value as f64));
 
@@ -1175,8 +1156,8 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 move |mut caller, params, results| {
                     let index = params.get(1).unwrap().unwrap_i32();
                     let value = val_to_char_array(&mut caller, params.get(2).unwrap());
-                    let statement: &mut Statement =
-                        val_to_externref(&mut caller, params.get(0).unwrap());
+                    let id = params.get(0).unwrap().unwrap_i32() as usize;
+                    let statement = &mut caller.data_mut().statements[id - 1];
 
                     let result = statement.bind((index as usize, value.as_slice()));
 
@@ -1199,8 +1180,8 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, results| {
                     let index = params.get(1).unwrap().unwrap_i32();
-                    let statement: &mut Statement =
-                        val_to_externref(&mut caller, params.get(0).unwrap());
+                    let id = params.get(0).unwrap().unwrap_i32() as usize;
+                    let statement = &mut caller.data_mut().statements[id - 1];
 
                     let result = statement.bind((index as usize, sqlite::Value::Null));
 
@@ -1219,8 +1200,8 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 "sqliteNext",
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, results| {
-                    let statement: &mut Statement =
-                        val_to_externref(&mut caller, params.get(0).unwrap());
+                    let id = params.get(0).unwrap().unwrap_i32() as usize;
+                    let statement = &mut caller.data_mut().statements[id - 1];
 
                     let state = statement.next();
 
@@ -1251,8 +1232,8 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, _results| {
                     let value = val_to_string(&mut caller, params.get(1).unwrap());
-                    let statement: &mut Statement =
-                        val_to_externref(&mut caller, params.get(0).unwrap());
+                    let id = params.get(0).unwrap().unwrap_i32() as usize;
+                    let statement = &caller.data().statements[id - 1];
                     let result: String = statement.read(value.as_str()).unwrap_or_default();
 
                     caller.data_mut().output.push_str(&result);
@@ -1274,8 +1255,8 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, results| {
                     let value = val_to_string(&mut caller, params.get(1).unwrap());
-                    let statement: &mut Statement =
-                        val_to_externref(&mut caller, params.get(0).unwrap());
+                    let id = params.get(0).unwrap().unwrap_i32() as usize;
+                    let statement = &caller.data().statements[id - 1];
 
                     let result: String = statement.read(value.as_str()).unwrap_or_default();
 
@@ -1297,8 +1278,8 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, results| {
                     let value = val_to_string(&mut caller, params.get(1).unwrap());
-                    let statement: &mut Statement =
-                        val_to_externref(&mut caller, params.get(0).unwrap());
+                    let id = params.get(0).unwrap().unwrap_i32() as usize;
+                    let statement = &caller.data().statements[id - 1];
 
                     let result: i64 = statement.read(value.as_str()).unwrap_or_default();
 
@@ -1320,8 +1301,8 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, results| {
                     let value = val_to_string(&mut caller, params.get(1).unwrap());
-                    let statement: &mut Statement =
-                        val_to_externref(&mut caller, params.get(0).unwrap());
+                    let id = params.get(0).unwrap().unwrap_i32() as usize;
+                    let statement = &caller.data().statements[id - 1];
 
                     let result: f64 = statement.read(value.as_str()).unwrap_or_default();
 
@@ -1343,8 +1324,8 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, results| {
                     let value = val_to_string(&mut caller, params.get(1).unwrap());
-                    let statement: &mut Statement =
-                        val_to_externref(&mut caller, params.get(0).unwrap());
+                    let id = params.get(0).unwrap().unwrap_i32() as usize;
+                    let statement = &caller.data().statements[id - 1];
 
                     let result: Vec<u8> = statement.read(value.as_str()).unwrap_or_default();
 
@@ -1366,8 +1347,8 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
                 func_ty.ty().func().unwrap().clone(),
                 move |mut caller, params, results| {
                     let value = val_to_string(&mut caller, params.get(1).unwrap());
-                    let statement: &mut Statement =
-                        val_to_externref(&mut caller, params.get(0).unwrap());
+                    let id = params.get(0).unwrap().unwrap_i32() as usize;
+                    let statement = &caller.data().statements[id - 1];
 
                     let result: Value = statement.read(value.as_str()).unwrap_or_default();
 
@@ -1383,31 +1364,34 @@ fn link_script(engine: &Engine, module: &Module) -> InstancePre<Context> {
 
 fn run_script(
     req: &mut Request,
-    engine: &Engine,
-    instance_pre: &InstancePre<Context>,
+    store: &mut Store<Context>,
+    start: &mut Func,
     text: Rc<Vec<String>>,
 ) {
     let instant = Instant::now();
     let environs = req.params();
     let headers = String::new();
     let output = String::new();
+    let connections = Vec::new();
+    let statements = Vec::new();
     let mut input = String::new();
     req.stdin().read_to_string(&mut input).unwrap();
 
-    let mut store = Store::new(
-        engine,
-        Context {
-            headers,
-            input,
-            output,
-            text,
-            environs,
-        },
-    );
-    let instance = instance_pre.instantiate(&mut store).unwrap();
-    let start = instance.get_func(&mut store, "<start>").unwrap();
+    *store.data_mut() = Context {
+        headers,
+        input,
+        output,
+        environs,
+        connections,
+        statements,
+        text: text.clone(),
+    };
 
-    unsafe { start.call_unchecked(&mut store, &mut *vec![]).unwrap() };
+    unsafe {
+        start
+            .call_unchecked(store.as_context_mut(), &mut *vec![])
+            .unwrap()
+    };
 
     if !store.data().headers.contains("Content-Type:") {
         store
@@ -1425,6 +1409,10 @@ fn run_script(
         store.data().output
     )
     .unwrap_or(());
+
+    store.data_mut().statements.clear();
+    store.data_mut().connections.clear();
+    store.gc(None);
 }
 
 fn request(mut req: Request, engine: &Engine, scripts: &mut HashMap<String, Script>) {
@@ -1444,7 +1432,7 @@ fn request(mut req: Request, engine: &Engine, scripts: &mut HashMap<String, Scri
             return;
         };
 
-        let script = scripts.get(&path);
+        let script = scripts.get_mut(&path);
         if script.is_none()
             || script
                 .as_ref()
@@ -1500,18 +1488,40 @@ fn request(mut req: Request, engine: &Engine, scripts: &mut HashMap<String, Scri
             let module = Module::from_binary(engine, &output).unwrap();
             let instance_pre = link_script(engine, &module);
             let text = Rc::new(text);
-            run_script(&mut req, engine, &instance_pre, text.clone());
 
-            let script = Script {
+            let mut store = Store::new(
+                engine,
+                Context {
+                    ..Default::default()
+                },
+            );
+
+            let instance = instance_pre.instantiate(&mut store).unwrap();
+            let start = instance.get_func(&mut store, "<start>").unwrap();
+
+            let mut script = Script {
                 modified: metadata.modified().unwrap(),
-                instance_pre,
                 text,
+                store,
+                start,
             };
+
+            run_script(
+                &mut req,
+                &mut script.store,
+                &mut script.start,
+                script.text.clone(),
+            );
 
             scripts.insert(path, script);
         } else {
             let script = script.unwrap();
-            run_script(&mut req, engine, &script.instance_pre, script.text.clone());
+            run_script(
+                &mut req,
+                &mut script.store,
+                &mut script.start,
+                script.text.clone(),
+            );
         }
     }));
 
@@ -1539,20 +1549,15 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let mut pool = PoolingAllocationConfig::new();
-    pool.total_gc_heaps(10000);
-    pool.total_core_instances(10000);
-
     let mut config = Config::new();
     config.wasm_gc(true);
     config.parallel_compilation(true);
-    config.collector(wasmtime::Collector::Null);
+    config.collector(wasmtime::Collector::DeferredReferenceCounting);
     config.wasm_reference_types(true);
     config.wasm_function_references(true);
     config.signals_based_traps(true);
     config.memory_init_cow(true);
     config.macos_use_mach_ports(false);
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
 
     let engine = Engine::new(&config).unwrap();
     let mut scripts = HashMap::<String, Script>::new();
