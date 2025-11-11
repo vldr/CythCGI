@@ -82,79 +82,12 @@ const IMPORTS: &str = "import \"env\"
     void sqlitePrint(int a, string b)
     T sqliteRead<T>(int a, string b)
 
-int stringIndexOf(string s, string target)
-    if target.length == 0
-        return 0
-
-    for int i = 0; i <= s.length - target.length; i += 1
-        bool match = true
-
-        for char c in target
-            if s[i + it] != c
-                match = false
-                break
-
-        if match
-            return i
-
-    return -1
-
-bool stringContains(string s, string target)
-    return stringIndexOf(s, target) != -1
-
-string stringTrim(string s)
-    if not s
-        return s
-
-    int start = 0
-    int end = s.length - 1
-
-    while start < s.length and (s[start] == ' ' or s[start] == '\t' or s[start] == '\n' or s[start] == '\r')
-        start += 1
-
-    while end >= start and (s[end] == ' ' or s[end] == '\t' or s[end] == '\n' or s[end] == '\r')
-        end -= 1
-
-    char[] result
-    for int i = start; i <= end; i += 1
-        result.push(s[i])
-
-    return result.toString()
-
-string[] stringSplit(string s, char delim)
-    string[] result
-    char[] current
-
-    for char c in s
-        if c != delim
-            current.push(c)
-        else
-            result.push(current.toString())
-            current.clear()
-
-    result.push(current.toString())
-    return result
-
-string stringJoin(string[] parts, string delim)
-    string[] result
-    char[] buf
-
-    for string part in parts
-        for char c in part
-            buf.push(c)
-
-        if it != parts.length - 1
-            for char c in delim
-                buf.push(c)
-
-    return buf.toString()
-
 Map<string, string> parseQuery(string query)
     Map<string, string> result = Map<string, string>()
 
-    string[] pairs = stringSplit(query, '&')
+    string[] pairs = query.split(\"&\")
     for string pair in pairs
-        string[] parts = stringSplit(pair, '=')
+        string[] parts = pair.split(\"=\")
 
         if parts.length == 2
             result.insert(parts[0], urlDecode(parts[1]))
@@ -162,7 +95,7 @@ Map<string, string> parseQuery(string query)
     return result
 
 int parseInt(string n, int base)
-    n = stringTrim(n)
+    n = n.trim()
     if not n
         return 0
 
