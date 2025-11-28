@@ -662,16 +662,16 @@ fn run_transport<F>(mut handler: F, transport: &mut Transport)
 where
     F: FnMut(Request),
 {
-    #[cfg(unix)]
-    for i in 0..num_cpus::get() - 1 {
-        match fork::fork() {
-            Ok(fork::Fork::Parent(child)) => {
-                break;
-            }
-            Ok(fork::Fork::Child) => println!("Creating child process: {}", i),
-            Err(_) => println!("Fork failed"),
-        }
-    }
+    // #[cfg(unix)]
+    // for i in 0..num_cpus::get() - 1 {
+    //     match fork::fork() {
+    //         Ok(fork::Fork::Parent(child)) => {
+    //             break;
+    //         }
+    //         Ok(fork::Fork::Child) => println!("Creating child process: {}", i),
+    //         Err(_) => println!("Fork failed"),
+    //     }
+    // }
 
     let addrs: Option<HashSet<String>> = match std::env::var("FCGI_WEB_SERVER_ADDRS") {
         Ok(value) => Some(value.split(',').map(|s| s.to_owned()).collect()),
