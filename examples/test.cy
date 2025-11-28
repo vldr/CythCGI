@@ -14,5 +14,5 @@ bool result = connection.execute("
 ")
 
 print((string)result)
-
-?>bye
+?>
+bye
