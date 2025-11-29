@@ -456,6 +456,12 @@ fn run_script(req: &mut Request, context: &mut Context, script: &Script) {
 
     unsafe { jit_run(script.jit) };
 
+    if !context.headers.contains("Content-Type:") {
+        context
+            .headers
+            .push_str("Content-Type: text/html; charset=UTF-8\n");
+    }
+
     write!(
         &mut req.stdout(),
         "Interval: {:?}\nContent-Length: {}\n{}\n{}",
