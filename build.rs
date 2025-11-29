@@ -12,5 +12,7 @@ fn main() {
         .file("vendor/cyth/third_party/mir/mir.c")
         .file("vendor/cyth/third_party/mir/mir-gen.c")
         .warnings(false)
+        .define("NDEBUG", None)
+        .opt_level(4)
         .compile("cyth");
 }
