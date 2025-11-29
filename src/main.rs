@@ -31,6 +31,7 @@ use uuid::Uuid;
 struct Script {
     modified: SystemTime,
     text: Rc<Vec<String>>,
+    jit: *const c_void,
 }
 
 unsafe extern "C" {
@@ -444,7 +445,30 @@ fn read_script(path: &String) -> (String, Vec<String>, Vec<(i32, i32)>) {
     (output, text, mapping)
 }
 
-fn run_script(req: &mut Request, text: Rc<Vec<String>>) {}
+fn run_script(req: &mut Request, context: &mut Context, script: &Script) {
+    let instant = Instant::now();
+    context.text = script.text.clone();
+    context.environs = req.params();
+    context.headers.clear();
+    context.output.clear();
+    context.input.clear();
+    req.stdin().read_to_string(&mut context.input).unwrap();
+
+    unsafe { jit_run(script.jit) };
+
+    write!(
+        &mut req.stdout(),
+        "Interval: {:?}\nContent-Length: {}\n{}\n{}",
+        instant.elapsed(),
+        context.output.len(),
+        context.headers,
+        context.output
+    )
+    .unwrap_or(());
+
+    context.statements.clear();
+    context.connections.clear();
+}
 
 fn link_script(jit: *const c_void) {
     unsafe {
@@ -922,7 +946,7 @@ fn link_script(jit: *const c_void) {
     }
 }
 
-fn request(mut req: Request, scripts: &mut HashMap<String, Script>) {
+fn request(mut req: Request, context: &mut Context, scripts: &mut HashMap<String, Script>) {
     let Some(path) = req.param("SCRIPT_FILENAME") else {
         write!(
             &mut req.stdout(),
@@ -956,73 +980,43 @@ fn request(mut req: Request, scripts: &mut HashMap<String, Script>) {
     {
         let (source, text, mapping) = read_script(&path);
 
-        unsafe {
-            let context = unsafe { &mut *CONTEXT };
-            context.path = path;
-            context.mapping = mapping;
+        context.path = path;
+        context.mapping = mapping;
 
-            let instant = Instant::now();
-
-            context.text = Rc::new(text);
-            context.environs = req.params();
-            context.headers.clear();
-            context.output.clear();
-            context.connections.clear();
-            context.statements.clear();
-            context.input.clear();
-
-            req.stdin().read_to_string(&mut context.input).unwrap();
-
-            let source = CString::new(source).unwrap();
-            let jit = jit(source.as_ptr());
-            if jit.is_null() {
-                write!(
-                    &mut req.stdout(),
-                    "{}{}{}",
-                    "Status: 500 Internal Server Error\n",
-                    "Content-Type: text/plain\n\n",
-                    context.output
-                )
-                .unwrap_or(());
-                return;
-            }
-
-            link_script(jit);
-
-            // run_script(&mut req);
-
-            jit_run(jit);
-
+        let source = CString::new(source).unwrap();
+        let jit = unsafe { jit(source.as_ptr()) };
+        if jit.is_null() {
             write!(
                 &mut req.stdout(),
-                "Interval: {:?}\nContent-Length: {}\n{}\n{}",
-                instant.elapsed(),
-                context.output.len(),
-                context.headers,
+                "{}{}{}",
+                "Status: 500 Internal Server Error\n",
+                "Content-Type: text/plain\n\n",
                 context.output
             )
             .unwrap_or(());
+            return;
+        }
 
-            context.statements.clear();
-            context.connections.clear();
+        link_script(jit);
+
+        if let Some(script) = script {
+            unsafe { jit_destroy(script.jit) };
+        }
+
+        let script = Script {
+            modified: metadata.modified().unwrap(),
+            text: text.into(),
+            jit,
         };
 
-        // run_script(
-        //     &mut req,
-        //     &mut script.store,
-        //     &mut script.start,
-        //     script.text.clone(),
-        // );
-
-        // scripts.insert(path, script);
+        run_script(&mut req, context, &script);
+        scripts.insert(context.path.clone(), script);
     } else {
-        // let script = script.unwrap();
-        // run_script(
-        //     &mut req,
-        //     &mut script.store,
-        //     &mut script.start,
-        //     script.text.clone(),
-        // );
+        unsafe {
+            let context = &mut *CONTEXT;
+            let script = script.unwrap();
+            run_script(&mut req, context, &script);
+        }
     }
 }
 
@@ -1051,21 +1045,23 @@ fn main() -> ExitCode {
         ));
     }
 
-    unsafe {
-        let mut context = Context::default();
-        CONTEXT = &mut context as *mut Context;
+    let mut context = Box::leak(Box::new(Context::default()));
+    let mut scripts = HashMap::<String, Script>::new();
 
+    unsafe {
+        CONTEXT = context as *mut Context;
         set_error_callback(error as *const c_void)
     };
 
-    let mut scripts = HashMap::<String, Script>::new();
-
     if env::args().count() > 2 {
         let listener = TcpListener::bind(args().nth(2).unwrap()).unwrap();
-        fastcgi::run_tcp(move |req| request(req, &mut scripts), &listener);
+        fastcgi::run_tcp(
+            move |req| request(req, &mut context, &mut scripts),
+            &listener,
+        );
     } else {
         #[cfg(unix)]
-        fastcgi::run(move |req| request(req, &mut scripts));
+        fastcgi::run(move |req| request(req, &mut context, &mut scripts));
 
         #[cfg(windows)]
         {

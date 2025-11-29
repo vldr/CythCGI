@@ -111,7 +111,7 @@
         buffer.push('\n')
         buffer.push('\n')
       
-      printBuffer(buffer)
+      print(buffer.toString())
       ?>
 
   ];

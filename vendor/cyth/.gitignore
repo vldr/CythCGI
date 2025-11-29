@@ -1,0 +1,11 @@
+editor/cyth.js
+editor/cyth.wasm
+compile_commands.json
+build/
+xbuild/
+winbuild/
+embuild/
+.cache/
+.vs/
+.vscode/
+.DS_Store

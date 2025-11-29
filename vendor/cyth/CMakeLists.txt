@@ -1,0 +1,98 @@
+cmake_minimum_required(VERSION 3.16)
+option(WASM "Enable WASM codegen, when disabled will use JIT" ${EMSCRIPTEN})
+
+if (NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Choose Debug or Release" FORCE)
+endif()
+
+project(cyth)
+
+if (NOT MSVC)
+    if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+        add_link_options(-fsanitize=address -fsanitize=undefined)
+    endif()
+endif()
+
+if (EMSCRIPTEN)
+    add_link_options(--closure 1 -sFILESYSTEM=0 -sALLOW_MEMORY_GROWTH=1 -sALLOW_TABLE_GROWTH=1 
+                     -sEXPORTED_RUNTIME_METHODS=addFunction,UTF8ToString,HEAPU8 -sSTACK_SIZE=524288
+                     -sEXPORTED_FUNCTIONS=_free,_memory_alloc,_run,_set_error_callback,_set_result_callback)
+
+    add_custom_target(test
+        COMMAND node test/_test_wasm_web.js
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        DEPENDS cyth
+    )
+
+    add_custom_target(serve
+        COMMAND npx http-server -c-1 editor/
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        DEPENDS cyth
+    )
+else()
+    if (NOT MSVC)
+        add_link_options(-pthread -lm)
+    endif()
+
+    if (WASM)
+        add_custom_target(test
+            COMMAND node test/_test_wasm.js $<TARGET_FILE:cyth>
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            DEPENDS cyth
+        )
+    else()
+        add_custom_target(test
+            COMMAND node test/_test.js $<TARGET_FILE:cyth>
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            DEPENDS cyth
+        )
+    endif()
+endif()
+
+set(SOURCES
+    src/array.h src/checker.c src/checker.h src/environment.c src/environment.h
+    src/expression.h src/lexer.c src/lexer.h src/main.c src/main.h src/map.c
+    src/map.h src/memory.c src/memory.h src/parser.c src/parser.h src/statement.h
+)
+
+if (WASM)
+    add_subdirectory(third_party/binaryen)
+    list(APPEND SOURCES src/codegen.c src/codegen.h)
+else()
+    add_subdirectory(third_party/mir)
+    list(APPEND SOURCES src/jit.c src/jit.h)
+endif()
+
+add_executable(cyth ${SOURCES})
+add_library(libcyth STATIC ${SOURCES})
+
+if (MSVC)
+    target_compile_options(cyth PRIVATE /MP)
+else()
+    target_compile_options(cyth PRIVATE -Wall -Wextra -pedantic -Wno-gnu-flexible-array-initializer)
+
+    if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+        target_compile_options(cyth PRIVATE -fsanitize=address -fsanitize=undefined -D_DEBUG)
+    else()
+        target_compile_options(cyth PRIVATE -flto)
+    endif()
+endif()
+
+if (EMSCRIPTEN)
+    add_custom_command(TARGET cyth POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy
+                $<TARGET_FILE_DIR:cyth>/cyth.js
+                ${CMAKE_SOURCE_DIR}/editor/cyth.js
+        COMMAND ${CMAKE_COMMAND} -E copy
+                $<TARGET_FILE_DIR:cyth>/cyth.wasm
+                ${CMAKE_SOURCE_DIR}/editor/cyth.wasm)
+endif()
+
+if (WASM)
+    target_compile_definitions(cyth PRIVATE WASM=1)
+    target_link_libraries(cyth PRIVATE binaryen)
+else()
+    target_link_libraries(cyth PRIVATE mir)
+    target_link_libraries(libcyth PRIVATE mir)
+endif()
+
