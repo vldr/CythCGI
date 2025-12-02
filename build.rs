@@ -1,6 +1,10 @@
 fn main() {
     cc::Build::new()
+        .define("NDEBUG", None)
+        .warnings(false)
+        .opt_level(3)
         .include("vendor/cyth/third_party/mir")
+        .include("vendor/cyth/third_party/bdwgc/include")
         .file("vendor/cyth/src/checker.c")
         .file("vendor/cyth/src/environment.c")
         .file("vendor/cyth/src/lexer.c")
@@ -11,8 +15,6 @@ fn main() {
         .file("vendor/cyth/src/parser.c")
         .file("vendor/cyth/third_party/mir/mir.c")
         .file("vendor/cyth/third_party/mir/mir-gen.c")
-        .warnings(false)
-        .define("NDEBUG", None)
-        .opt_level(4)
+        .file("vendor/cyth/third_party/bdwgc/extra/gc.c")
         .compile("cyth");
 }

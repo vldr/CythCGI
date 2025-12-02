@@ -40,7 +40,7 @@ unsafe extern "C" {
     fn jit_generate(jit: *const c_void, logging: c_int);
     fn jit_run(jit: *const c_void);
     fn jit_destroy(jit: *const c_void);
-    fn jit_alloc(jit: *const c_void, size: c_int);
+    fn jit_alloc(atomic: c_int, size: usize) -> *const c_void;
     fn set_error_callback(cb: *const c_void);
 }
 
@@ -50,7 +50,7 @@ pub fn cyth_new(s: &str) -> *mut u8 {
         let total_size = 4 + s.len();
         let layout = Layout::from_size_align(total_size, 4).unwrap();
 
-        let ptr = alloc(layout);
+        let ptr = jit_alloc(1, layout.size()) as *mut u8;
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
@@ -988,6 +988,7 @@ fn request(mut req: Request, context: &mut Context, scripts: &mut HashMap<String
 
         context.path = path;
         context.mapping = mapping;
+        context.output.clear();
 
         let source = CString::new(source).unwrap();
         let jit = unsafe { jit(source.as_ptr()) };
