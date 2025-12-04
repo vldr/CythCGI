@@ -1,6 +1,7 @@
 fn main() {
     cc::Build::new()
         .define("NDEBUG", None)
+        .flag_if_supported("-fsigned-char")
         .warnings(false)
         .opt_level(3)
         .include("vendor/cyth/third_party/mir")

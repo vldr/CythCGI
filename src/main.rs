@@ -1,7 +1,7 @@
 extern crate fastcgi;
 
 use std::{
-    alloc::{Layout, alloc},
+    alloc::Layout,
     cmp,
     collections::HashMap,
     env::{self, args},
@@ -11,18 +11,16 @@ use std::{
     io::{Read, Write},
     mem::transmute,
     net::TcpListener,
-    panic::{AssertUnwindSafe, catch_unwind},
-    process::{Command, ExitCode, Stdio},
+    process::ExitCode,
     ptr,
     rc::Rc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use bcrypt::{DEFAULT_COST, hash, verify};
+use bcrypt::DEFAULT_COST;
 use chrono::{DateTime, Local};
 use markdown::{CompileOptions, Options};
 use percent_encoding::NON_ALPHANUMERIC;
-use regex::Regex;
 
 use fastcgi::Request;
 use sqlite::{Connection, ConnectionThreadSafe, State, Statement, Value};
@@ -44,7 +42,7 @@ unsafe extern "C" {
     fn set_error_callback(cb: *const c_void);
 }
 
-pub fn cyth_new(s: &str) -> *mut u8 {
+fn cyth_new_string(s: &str) -> *mut u8 {
     unsafe {
         let len = s.len() as i32;
         let total_size = 4 + s.len();
@@ -62,11 +60,82 @@ pub fn cyth_new(s: &str) -> *mut u8 {
     }
 }
 
-pub unsafe fn cyth_as_str<'a>(ptr: *const u8) -> &'a str {
+fn cyth_new_string_array(list: Vec<&str>) -> *mut u8 {
+    unsafe {
+        let total_size = 4 + 4 + size_of::<usize>();
+        let layout = Layout::from_size_align(total_size, size_of::<usize>()).unwrap();
+
+        let array_total_size = size_of::<usize>() * list.len();
+        let array_layout = Layout::from_size_align(array_total_size, size_of::<usize>()).unwrap();
+
+        let ptr = jit_alloc(0, layout.size()) as *mut u8;
+        if ptr.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+
+        let mut array_ptr = jit_alloc(0, array_layout.size()) as *mut u8;
+        if array_ptr.is_null() {
+            std::alloc::handle_alloc_error(array_layout);
+        }
+
+        ptr::write(ptr as *mut i32, list.len() as i32);
+        ptr::write(ptr.add(4) as *mut i32, list.len() as i32);
+        ptr::write(ptr.add(8) as *mut usize, array_ptr as usize);
+
+        for string in list {
+            let string = cyth_new_string(string);
+            ptr::write(array_ptr as *mut usize, string as usize);
+
+            array_ptr = array_ptr.add(size_of::<usize>());
+        }
+
+        ptr
+    }
+}
+
+fn cyth_new_char_array(list: Vec<u8>) -> *mut u8 {
+    unsafe {
+        let total_size = 4 + 4 + size_of::<usize>();
+        let layout = Layout::from_size_align(total_size, size_of::<usize>()).unwrap();
+
+        let array_total_size = 1 * list.len();
+        let array_layout = Layout::from_size_align(array_total_size, 1).unwrap();
+
+        let ptr = jit_alloc(0, layout.size()) as *mut u8;
+        if ptr.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+
+        let mut array_ptr = jit_alloc(0, array_layout.size()) as *mut u8;
+        if array_ptr.is_null() {
+            std::alloc::handle_alloc_error(array_layout);
+        }
+
+        ptr::write(ptr as *mut i32, list.len() as i32);
+        ptr::write(ptr.add(4) as *mut i32, list.len() as i32);
+        ptr::write(ptr.add(8) as *mut usize, array_ptr as usize);
+
+        for char in list {
+            ptr::write(array_ptr, char);
+
+            array_ptr = array_ptr.add(1);
+        }
+
+        ptr
+    }
+}
+
+unsafe fn cyth_as_str<'a>(ptr: *const u8) -> &'a str {
     let len = unsafe { *(ptr as *const i32) } as usize;
     let data_ptr = unsafe { ptr.add(4) };
     let slice: &[u8] = unsafe { transmute((data_ptr, len)) };
     unsafe { transmute(slice) }
+}
+
+unsafe fn cyth_as_slice<'a>(ptr: *const u8) -> &'a [u8] {
+    let len = unsafe { *(ptr as *const i32) } as usize;
+    let data_ptr = unsafe { ptr::read(ptr.add(8) as *mut usize) as *const u8 };
+    unsafe { transmute((data_ptr, len)) }
 }
 
 #[derive(Default)]
@@ -513,10 +582,9 @@ fn link_script(jit: *const c_void) {
 
         unsafe extern "C" fn url_encode(input: *const u8) -> *const u8 {
             let input = unsafe { cyth_as_str(input) };
-            let output =
-                percent_encoding::utf8_percent_encode(&input, NON_ALPHANUMERIC).to_string();
+            let output = percent_encoding::utf8_percent_encode(input, NON_ALPHANUMERIC).to_string();
 
-            cyth_new(&output)
+            cyth_new_string(&output)
         }
         jit_set_function(
             jit,
@@ -526,13 +594,13 @@ fn link_script(jit: *const c_void) {
 
         unsafe extern "C" fn url_decode(input: *const u8) -> *const u8 {
             let input = unsafe { cyth_as_str(input) };
-            let output = percent_encoding::percent_decode_str(&input)
+            let output = percent_encoding::percent_decode_str(input)
                 .decode_utf8()
                 .unwrap_or("".into())
                 .into_owned()
                 .replace("+", " ");
 
-            cyth_new(&output)
+            cyth_new_string(&output)
         }
         jit_set_function(
             jit,
@@ -543,7 +611,7 @@ fn link_script(jit: *const c_void) {
         unsafe extern "C" fn markdown(input: *const u8) -> *const u8 {
             let input = unsafe { cyth_as_str(input) };
             let output = markdown::to_html_with_options(
-                &input,
+                input,
                 &Options {
                     compile: CompileOptions {
                         allow_dangerous_html: true,
@@ -554,7 +622,7 @@ fn link_script(jit: *const c_void) {
             )
             .unwrap_or("".to_owned());
 
-            cyth_new(&output)
+            cyth_new_string(&output)
         }
         jit_set_function(
             jit,
@@ -564,8 +632,8 @@ fn link_script(jit: *const c_void) {
 
         unsafe extern "C" fn hash(input: *const u8) -> *const u8 {
             let input = unsafe { cyth_as_str(input) };
-            let output = bcrypt::hash(&input, DEFAULT_COST).unwrap();
-            cyth_new(&output)
+            let output = bcrypt::hash(input, DEFAULT_COST).unwrap();
+            cyth_new_string(&output)
         }
         jit_set_function(
             jit,
@@ -576,7 +644,7 @@ fn link_script(jit: *const c_void) {
         unsafe extern "C" fn verify(password: *const u8, hash: *const u8) -> c_int {
             let password = unsafe { cyth_as_str(password) };
             let hash = unsafe { cyth_as_str(hash) };
-            let output = bcrypt::verify(&password, &hash).unwrap();
+            let output = bcrypt::verify(password, hash).unwrap();
 
             output.into()
         }
@@ -589,7 +657,7 @@ fn link_script(jit: *const c_void) {
         unsafe extern "C" fn body() -> *const u8 {
             let context = unsafe { &mut *CONTEXT };
 
-            cyth_new(&context.input)
+            cyth_new_string(&context.input)
         }
         jit_set_function(
             jit,
@@ -602,7 +670,7 @@ fn link_script(jit: *const c_void) {
             let default = String::new();
             let query = context.environs.get("QUERY_STRING").unwrap_or(&default);
 
-            cyth_new(&query)
+            cyth_new_string(query)
         }
         jit_set_function(
             jit,
@@ -642,9 +710,9 @@ fn link_script(jit: *const c_void) {
                 }
 
                 let result = &cookie[start..end].trim().to_owned();
-                return cyth_new(&result);
+                cyth_new_string(result)
             } else {
-                return cyth_new(&empty_string);
+                cyth_new_string(&empty_string)
             }
         }
         jit_set_function(
@@ -655,7 +723,7 @@ fn link_script(jit: *const c_void) {
 
         unsafe extern "C" fn uuid() -> *const u8 {
             let uuid = Uuid::new_v4();
-            cyth_new(&uuid.as_hyphenated().to_string())
+            cyth_new_string(&uuid.as_hyphenated().to_string())
         }
         jit_set_function(
             jit,
@@ -670,7 +738,7 @@ fn link_script(jit: *const c_void) {
             let empty_string = "".to_owned();
             let environ = context.environs.get(key).unwrap_or(&empty_string);
 
-            cyth_new(&environ)
+            cyth_new_string(environ)
         }
 
         jit_set_function(
@@ -679,27 +747,24 @@ fn link_script(jit: *const c_void) {
             get_environ as *const c_void,
         );
 
-        unsafe extern "C" fn getEnvirons() {
+        unsafe extern "C" fn get_environs() -> *const u8 {
             let context = unsafe { &mut *CONTEXT };
 
-            println!("hello {}", context.headers);
+            cyth_new_string_array(context.environs.keys().map(|key| key.as_str()).collect())
         }
 
         jit_set_function(
             jit,
             CString::new("getEnvirons").unwrap().as_ptr(),
-            print as *const c_void,
+            get_environs as *const c_void,
         );
 
         unsafe extern "C" fn date(epoch: c_int, format: *const u8) -> *const u8 {
-            let context = unsafe { &mut *CONTEXT };
-
             let format = unsafe { cyth_as_str(format) };
-
             let datetime = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs(epoch as u64));
-            let result = datetime.format(&format).to_string();
+            let result = datetime.format(format).to_string();
 
-            cyth_new(&result)
+            cyth_new_string(&result)
         }
         jit_set_function(
             jit,
@@ -802,10 +867,14 @@ fn link_script(jit: *const c_void) {
             sqlite_bind_float as *const c_void,
         );
 
-        unsafe extern "C" fn sqlite_bind_char() {
-            let context = &mut *CONTEXT;
+        unsafe extern "C" fn sqlite_bind_char(id: c_int, index: c_int, value: *const u8) -> c_int {
+            let context = unsafe { &mut *CONTEXT };
+            let Some(statement) = context.statements.get_mut((id - 1) as usize) else {
+                return 0;
+            };
 
-            println!("hello {}", context.headers);
+            let slice = unsafe { cyth_as_slice(value) };
+            statement.bind((index as usize, slice)).is_ok() as c_int
         }
         jit_set_function(
             jit,
@@ -859,14 +928,12 @@ fn link_script(jit: *const c_void) {
             match state {
                 Ok(state) => {
                     if state == State::Row {
-                        return 1;
+                        1
                     } else {
-                        return 0;
+                        0
                     }
                 }
-                Err(_) => {
-                    return 0;
-                }
+                Err(_) => 0,
             }
         }
         jit_set_function(
@@ -905,25 +972,30 @@ fn link_script(jit: *const c_void) {
             sqlite_read_float as *const c_void,
         );
 
-        unsafe extern "C" fn sqliteReadChar() {
-            let context = &mut *CONTEXT;
+        unsafe extern "C" fn sqlite_read_char(id: c_int, value: *const u8) -> *const u8 {
+            let context = unsafe { &mut *CONTEXT };
+            let value = unsafe { cyth_as_str(value) };
 
-            println!("hello {}", context.headers);
+            let Some(statement) = context.statements.get_mut((id - 1) as usize) else {
+                return cyth_new_char_array([].to_vec());
+            };
+
+            cyth_new_char_array(statement.read::<Vec<u8>, &str>(value).unwrap_or_default())
         }
         jit_set_function(
             jit,
             CString::new("sqliteRead<char[]>").unwrap().as_ptr(),
-            print as *const c_void,
+            sqlite_read_char as *const c_void,
         );
 
         unsafe extern "C" fn sqlite_read_string(id: c_int, value: *const u8) -> *const u8 {
             let context = unsafe { &mut *CONTEXT };
             let value = unsafe { cyth_as_str(value) };
             let Some(statement) = context.statements.get_mut((id - 1) as usize) else {
-                return cyth_new("");
+                return cyth_new_string("");
             };
 
-            cyth_new(&statement.read::<String, &str>(value).unwrap_or_default())
+            cyth_new_string(&statement.read::<String, &str>(value).unwrap_or_default())
         }
         jit_set_function(
             jit,
@@ -1022,7 +1094,7 @@ fn request(mut req: Request, context: &mut Context, scripts: &mut HashMap<String
         unsafe {
             let context = &mut *CONTEXT;
             let script = script.unwrap();
-            run_script(&mut req, context, &script);
+            run_script(&mut req, context, script);
         }
     }
 }
@@ -1052,7 +1124,7 @@ fn main() -> ExitCode {
         ));
     }
 
-    let mut context = Box::leak(Box::new(Context::default()));
+    let context = Box::leak(Box::new(Context::default()));
     let mut scripts = HashMap::<String, Script>::new();
 
     unsafe {
@@ -1062,13 +1134,10 @@ fn main() -> ExitCode {
 
     if env::args().count() > 2 {
         let listener = TcpListener::bind(args().nth(2).unwrap()).unwrap();
-        fastcgi::run_tcp(
-            move |req| request(req, &mut context, &mut scripts),
-            &listener,
-        );
+        fastcgi::run_tcp(move |req| request(req, context, &mut scripts), &listener);
     } else {
         #[cfg(unix)]
-        fastcgi::run(move |req| request(req, &mut context, &mut scripts));
+        fastcgi::run(move |req| request(req, context, &mut scripts));
 
         #[cfg(windows)]
         {
