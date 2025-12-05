@@ -790,13 +790,17 @@ fn link_script(jit: *const c_void) {
             let path = unsafe { cyth_as_str(path) };
             let connection = Connection::open_thread_safe(path);
 
-            if let Ok(connection) = connection {
-                context.connections.push(connection);
+            match connection {
+                Ok(connection) => {
+                    context.connections.push(connection);
+                    context.connections.len() as c_int
+                }
+                Err(error) => {
+                    println!("{:?}", error.message);
 
-                return context.connections.len() as c_int;
+                    0
+                }
             }
-
-            0
         }
         jit_set_function(
             jit,
