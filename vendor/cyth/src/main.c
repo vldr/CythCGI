@@ -15,18 +15,17 @@
 #include <io.h>
 #endif
 
-typedef void (*error_callback_t)(int start_line, int start_column, int end_line, int end_column,
-                                 const char* message);
-typedef void (*result_callback_t)(size_t size, void* data, size_t source_map_size,
-                                  void* source_map);
+typedef void (*error_callback_t)(int start_line, int start_column, int end_line,
+                                 int end_column, const char *message);
+typedef void (*result_callback_t)(size_t size, void *data,
+                                  size_t source_map_size, void *source_map);
 
-static struct
-{
+static struct {
   bool error;
   bool logging;
 
-  const char* input_path;
-  const char* output_path;
+  const char *input_path;
+  const char *output_path;
 
   error_callback_t error_callback;
   result_callback_t result_callback;
@@ -37,30 +36,19 @@ static struct
 #else
 #include "jit.h"
 
-static void log_int(int n)
-{
-  printf("%d\n", n);
-}
+static void log_int(int n) { printf("%d\n", n); }
 
-static void log_float(float n)
-{
-  printf("%.10g\n", n);
-}
+static void log_float(float n) { printf("%.10g\n", n); }
 
-static void log_char(char n)
-{
-  printf("%c\n", n);
-}
+static void log_char(char n) { printf("%c\n", n); }
 
-static void log_string(String* n)
-{
+static void log_string(String *n) {
   fwrite(n->data, 1, n->size, stdout);
   putchar('\n');
 }
 
-Jit* jit(char* source)
-{
-  Jit* jit = NULL;
+Jit *jit(char *source) {
+  Jit *jit = NULL;
   cyth.error = false;
 
   lexer_init(source);
@@ -90,29 +78,23 @@ clean_up:
 }
 #endif
 
-void set_logging(bool logging)
-{
-  cyth.logging = logging;
-}
+void set_logging(bool logging) { cyth.logging = logging; }
 
-void set_error_callback(error_callback_t callback)
-{
+void set_error_callback(error_callback_t callback) {
   cyth.error_callback = callback;
 }
 
-void set_result_callback(result_callback_t callback)
-{
+void set_result_callback(result_callback_t callback) {
   cyth.result_callback = callback;
 }
 
-void error(int start_line, int start_column, int end_line, int end_column, const char* message)
-{
+void error(int start_line, int start_column, int end_line, int end_column,
+           const char *message) {
   cyth.error_callback(start_line, start_column, end_line, end_column, message);
   cyth.error = true;
 }
 
-void run(char* source, bool codegen)
-{
+void run(char *source, bool codegen) {
   cyth.error = false;
 
   lexer_init(source);
@@ -134,17 +116,16 @@ void run(char* source, bool codegen)
     goto clean_up;
 
 #ifdef WASM
-  if (codegen)
-  {
+  if (codegen) {
     codegen_init(statements);
     Codegen codegen = codegen_generate(cyth.logging);
 
-    cyth.result_callback(codegen.size, codegen.data, codegen.source_map_size, codegen.source_map);
+    cyth.result_callback(codegen.size, codegen.data, codegen.source_map_size,
+                         codegen.source_map);
   }
 #else
-  if (codegen)
-  {
-    Jit* jit = jit_init(statements);
+  if (codegen) {
+    Jit *jit = jit_init(statements);
     jit_set_function(jit, "log", (uintptr_t)log_int);
     jit_set_function(jit, "log(int)", (uintptr_t)log_int);
     jit_set_function(jit, "log(bool)", (uintptr_t)log_int);
@@ -167,12 +148,10 @@ clean_up:
   memory_reset();
 }
 
-static void run_file(void)
-{
+static void run_file(void) {
 #ifdef _WIN32
   int result = setmode(fileno(stdin), O_BINARY);
-  if (result == -1)
-  {
+  if (result == -1) {
     fprintf(stderr, "Could set 'stdin' mode to binary\n");
 
     cyth.error = true;
@@ -180,8 +159,7 @@ static void run_file(void)
   }
 
   result = setmode(fileno(stdout), O_BINARY);
-  if (result == -1)
-  {
+  if (result == -1) {
     fprintf(stderr, "Could set 'stdout' mode to binary\n");
 
     cyth.error = true;
@@ -189,11 +167,9 @@ static void run_file(void)
   }
 #endif
 
-  if (cyth.input_path)
-  {
-    FILE* file = fopen(cyth.input_path, "rb");
-    if (!file)
-    {
+  if (cyth.input_path) {
+    FILE *file = fopen(cyth.input_path, "rb");
+    if (!file) {
       fprintf(stderr, "Could not open file: %s\n", cyth.input_path);
 
       cyth.error = true;
@@ -204,11 +180,10 @@ static void run_file(void)
     size_t file_size = ftell(file);
     rewind(file);
 
-    char* source = memory_alloc(file_size + 1);
+    char *source = memory_alloc(file_size + 1);
     size_t bytes_read = fread(source, sizeof(unsigned char), file_size, file);
 
-    if (file_size != bytes_read)
-    {
+    if (file_size != bytes_read) {
       fprintf(stderr, "Could not read file: %s\n", cyth.input_path);
 
       cyth.error = true;
@@ -219,15 +194,12 @@ static void run_file(void)
     source[file_size] = '\0';
 
     run(source, true);
-  }
-  else
-  {
+  } else {
     ArrayChar source;
     array_init(&source);
 
     char c;
-    while ((c = getchar()) != EOF)
-    {
+    while ((c = getchar()) != EOF) {
       array_add(&source, c);
     }
 
@@ -237,15 +209,14 @@ static void run_file(void)
   }
 }
 
-static void handle_error(int start_line, int start_column, int end_line, int end_column,
-                         const char* message)
-{
-  fprintf(stderr, "%s:%d:%d-%d:%d: error: %s\n", cyth.input_path, start_line, start_column,
-          end_line, end_column, message);
+static void handle_error(int start_line, int start_column, int end_line,
+                         int end_column, const char *message) {
+  fprintf(stderr, "%s:%d:%d-%d:%d: error: %s\n", cyth.input_path, start_line,
+          start_column, end_line, end_column, message);
 }
 
-static void handle_result(size_t size, void* data, size_t source_map_size, void* source_map)
-{
+static void handle_result(size_t size, void *data, size_t source_map_size,
+                          void *source_map) {
   if (!data)
     return;
 
@@ -254,15 +225,14 @@ static void handle_result(size_t size, void* data, size_t source_map_size, void*
   if (cyth.input_path && !cyth.output_path)
     goto clean_up;
 
-  FILE* file;
+  FILE *file;
 
   if (cyth.input_path)
     file = fopen(cyth.output_path, "wb");
   else
     file = stdout;
 
-  if (!file)
-  {
+  if (!file) {
     fprintf(stderr, "Could not open file: %s\n", cyth.output_path);
 
     cyth.error = true;
@@ -270,8 +240,7 @@ static void handle_result(size_t size, void* data, size_t source_map_size, void*
   }
 
   size_t bytes_written = fwrite(data, sizeof(unsigned char), size, file);
-  if (size != bytes_written)
-  {
+  if (size != bytes_written) {
     fprintf(stderr, "Could not write file: %s\n", cyth.output_path);
 
     cyth.error = true;

@@ -6,7 +6,6 @@ use std::{
     collections::HashMap,
     env::{self, args},
     ffi::{CStr, CString, c_char, c_float, c_int, c_void},
-    fmt::Write as _,
     fs,
     io::{Read, Write},
     mem::transmute,
@@ -28,7 +27,6 @@ use uuid::Uuid;
 
 struct Script {
     modified: SystemTime,
-    text: Rc<Vec<String>>,
     jit: *const c_void,
 }
 
@@ -143,7 +141,6 @@ struct Context {
     input: String,
     output: String,
     headers: String,
-    text: Rc<Vec<String>>,
     environs: Rc<HashMap<String, String>>,
     connections: Vec<ConnectionThreadSafe>,
     statements: Vec<Statement>,
@@ -154,7 +151,6 @@ struct Context {
 const IMPORTS: &str = "import \"env\"
     void print(string a)
     void println(string a)
-    void printInternal(int index)
 
     string urlEncode(string a)
     string urlDecode(string a)
@@ -399,7 +395,7 @@ class Map<K, V>
 
 static mut CONTEXT: *mut Context = ptr::null_mut();
 
-fn read_script(path: &String) -> (String, Vec<String>, Vec<(i32, i32)>) {
+fn read_script(path: &String) -> (String, Vec<(i32, i32)>) {
     fn dedent(
         input: &str,
         mapping: &mut Vec<(i32, i32)>,
@@ -438,12 +434,19 @@ fn read_script(path: &String) -> (String, Vec<String>, Vec<(i32, i32)>) {
         result
     }
 
+    fn hex_from_digit(num: u8) -> char {
+        if num < 10 {
+            (b'0' + num) as char
+        } else {
+            (b'A' + num - 10) as char
+        }
+    }
+
     let input = fs::read_to_string(path).unwrap();
     let mut output = String::new();
     output += IMPORTS;
 
     let mut code = false;
-    let mut text = Vec::<String>::new();
     let mut mapping = Vec::<(i32, i32)>::new();
     let mut line = 1;
     let mut column = 1;
@@ -478,12 +481,15 @@ fn read_script(path: &String) -> (String, Vec<String>, Vec<(i32, i32)>) {
             if input.as_bytes()[i] == b'<' && i + 1 < input.len() && input.as_bytes()[i + 1] == b'?'
             {
                 if start < i {
-                    output += "printInternal(";
-                    output += &text.len().to_string();
-                    output += ")\n";
+                    output += "print(\"";
+                    for c in &input.as_bytes()[start..i] {
+                        output += "\\x";
+                        output.push(hex_from_digit(c / 16));
+                        output.push(hex_from_digit(c % 16));
+                    }
+                    output += "\")\n";
 
                     mapping.push((start_line, start_column - 1));
-                    text.push(input[start..i].to_owned());
                 }
 
                 start_column = column + 1;
@@ -498,12 +504,15 @@ fn read_script(path: &String) -> (String, Vec<String>, Vec<(i32, i32)>) {
         output += &dedent(&input[start..], &mut mapping, start_line, start_column);
     } else {
         if start < input.len() {
-            output += "printInternal(";
-            output += &text.len().to_string();
-            output += ")\n";
+            output += "print(\"";
+            for c in &input.as_bytes()[start..] {
+                output += "\\x";
+                output.push(hex_from_digit(c / 16));
+                output.push(hex_from_digit(c % 16));
+            }
+            output += "\")\n";
 
             mapping.push((start_line, start_column - 1));
-            text.push(input[start..].to_owned());
         }
     }
 
@@ -511,12 +520,11 @@ fn read_script(path: &String) -> (String, Vec<String>, Vec<(i32, i32)>) {
 
     mapping.push((line, column - 1));
 
-    (output, text, mapping)
+    (output, mapping)
 }
 
 fn run_script(req: &mut Request, context: &mut Context, script: &Script) {
     let instant = Instant::now();
-    context.text = script.text.clone();
     context.environs = req.params();
     context.headers.clear();
     context.output.clear();
@@ -566,18 +574,6 @@ fn link_script(jit: *const c_void) {
             jit,
             CString::new("println").unwrap().as_ptr(),
             println as *const c_void,
-        );
-
-        unsafe extern "C" fn print_internal(n: i32) {
-            let context = unsafe { &mut *CONTEXT };
-
-            let p = &context.text[n as usize];
-            context.output.write_str(p).unwrap();
-        }
-        jit_set_function(
-            jit,
-            CString::new("printInternal").unwrap().as_ptr(),
-            print_internal as *const c_void,
         );
 
         unsafe extern "C" fn url_encode(input: *const u8) -> *const u8 {
@@ -1056,7 +1052,7 @@ fn request(mut req: Request, context: &mut Context, scripts: &mut HashMap<String
             .modified
             .ne(&metadata.modified().unwrap())
     {
-        let (source, text, mapping) = read_script(&path);
+        let (source, mapping) = read_script(&path);
 
         context.path = path;
         context.mapping = mapping;
@@ -1084,7 +1080,6 @@ fn request(mut req: Request, context: &mut Context, scripts: &mut HashMap<String
 
         let script = Script {
             modified: metadata.modified().unwrap(),
-            text: text.into(),
             jit,
         };
 
