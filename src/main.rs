@@ -824,6 +824,12 @@ fn link_script(jit: *const c_void) {
 
             let query = unsafe { cyth_as_str(query) };
             let Some(connection) = context.connections.get_mut((id - 1) as usize) else {
+                println!(
+                    "Failed to get connection: {} {} {}",
+                    query,
+                    id,
+                    context.connections.len()
+                );
                 return 0;
             };
 
