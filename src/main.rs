@@ -571,8 +571,9 @@ fn link_script(jit: *const c_void) {
         unsafe extern "C" fn print_internal(n: i32) {
             let context = unsafe { &mut *CONTEXT };
 
-            let p = &context.text[n as usize];
-            context.output.write_str(p).unwrap();
+            if let Some(text) = context.text.get(n as usize) {
+                context.output.write_str(&text).unwrap();
+            }
         }
         jit_set_function(
             jit,
