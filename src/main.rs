@@ -827,12 +827,16 @@ fn link_script(jit: *const c_void) {
                 return 0;
             };
 
-            let Ok(statement) = connection.prepare(query) else {
-                return 0;
-            };
-
-            context.statements.push(statement);
-            context.statements.len() as c_int
+            match connection.prepare(query) {
+                Ok(statement) => {
+                    context.statements.push(statement);
+                    context.statements.len() as c_int
+                }
+                Err(error) => {
+                    println!("{:?}", error.message);
+                    0
+                }
+            }
         }
         jit_set_function(
             jit,
