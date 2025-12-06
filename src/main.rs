@@ -98,15 +98,15 @@ fn cyth_new_char_array(list: Vec<u8>) -> *mut u8 {
         let total_size = 4 + 4 + size_of::<usize>();
         let layout = Layout::from_size_align(total_size, size_of::<usize>()).unwrap();
 
-        let array_total_size = 1 * list.len();
-        let array_layout = Layout::from_size_align(array_total_size, 1).unwrap();
-
         let ptr = jit_alloc(0, layout.size()) as *mut u8;
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
 
-        let mut array_ptr = jit_alloc(0, array_layout.size()) as *mut u8;
+        let array_total_size = 1 * list.len();
+        let array_layout = Layout::from_size_align(array_total_size, 1).unwrap();
+
+        let mut array_ptr = jit_alloc(1, array_layout.size()) as *mut u8;
         if array_ptr.is_null() {
             std::alloc::handle_alloc_error(array_layout);
         }
