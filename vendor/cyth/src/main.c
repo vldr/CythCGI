@@ -252,25 +252,3 @@ clean_up:
   free(data);
   free(source_map);
 }
-
-// int main(int argc, char* argv[])
-// {
-//   if (argc < 2)
-//     cyth.input_path = NULL;
-//   else
-//     cyth.input_path = argv[1];
-
-//   if (argc < 3)
-//     cyth.output_path = NULL;
-//   else
-//     cyth.output_path = argv[2];
-
-//   set_error_callback(handle_error);
-//   set_result_callback(handle_result);
-//   set_logging(cyth.input_path && !cyth.output_path);
-
-//   run_file();
-//   memory_free();
-
-//   return cyth.error ? -1 : 0;
-// }

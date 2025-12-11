@@ -20,6 +20,14 @@
 #endif
 #endif
 
+#ifdef _WIN32
+#include <Windows.h>
+#else
+#define __USE_GNU
+#include <pthread.h>
+#include <signal.h>
+#endif
+
 typedef void (*Start)(void);
 typedef struct _FUNCTION
 {
@@ -60,6 +68,8 @@ struct _JIT
   Function string_float_cast;
   Function string_char_cast;
 };
+
+Jit* sig_jit;
 
 static void generate_default_initialization(Jit* jit, MIR_reg_t dest, DataType data_type);
 static void generate_string_cast(Jit* jit, MIR_reg_t dest, MIR_reg_t expr, MIR_reg_t depth,
@@ -5104,10 +5114,98 @@ void jit_generate(Jit* jit, bool logging)
   }
 }
 
+#ifdef _WIN32
+PVOID handler;
+static LONG WINAPI vector_handler(EXCEPTION_POINTERS* ExceptionInfo)
+{
+  switch (ExceptionInfo->ExceptionRecord->ExceptionCode)
+  {
+  case EXCEPTION_INT_DIVIDE_BY_ZERO:
+  case EXCEPTION_FLT_DIVIDE_BY_ZERO:
+    panic(sig_jit, "Division by zero", 0, 0);
+    return EXCEPTION_CONTINUE_EXECUTION;
+
+  case EXCEPTION_STACK_OVERFLOW:
+    panic(sig_jit, "Stack overflow", 0, 0);
+    return EXCEPTION_CONTINUE_EXECUTION;
+
+  default:
+    return EXCEPTION_CONTINUE_SEARCH;
+  }
+}
+#else
+static void sig_handler(int sig, siginfo_t* si, void* ctx)
+{
+  (void)ctx;
+
+  if (sig == SIGSEGV)
+  {
+    void* stack_base;
+    size_t stack_size;
+
+#if defined(__APPLE__)
+    stack_size = pthread_get_stacksize_np(pthread_self());
+    void* stack_addr = pthread_get_stackaddr_np(pthread_self());
+
+    int stack_variable;
+    if (stack_addr > (void*)&stack_variable)
+      stack_base = (uint8_t*)stack_addr - stack_size;
+    else
+      stack_base = stack_addr;
+#else
+    pthread_attr_t attributes;
+    pthread_getattr_np(pthread_self(), &attributes);
+    pthread_attr_getstack(&attributes, &stack_base, &stack_size);
+    pthread_attr_destroy(&attributes);
+#endif
+
+    uint8_t* fault = si->si_addr;
+
+    if (fault < (uint8_t*)stack_base && fault >= (uint8_t*)stack_base - stack_size)
+      panic(sig_jit, "Stack overflow", 0, 0);
+    else
+      panic(sig_jit, "Internal runtime error", 0, 0);
+  }
+  else if (sig == SIGFPE)
+  {
+    panic(sig_jit, "Division by zero", 0, 0);
+  }
+}
+#endif
+
 void* jit_push_jmp(Jit* jit, void* new)
 {
   jmp_buf* old = jit->jmp;
   jit->jmp = new;
+
+  if (!old)
+  {
+#ifndef _WIN32
+    static char stack[SIGSTKSZ * 2];
+    stack_t ss = {
+      .ss_size = SIGSTKSZ * 2,
+      .ss_sp = stack,
+    };
+    sigaltstack(&ss, NULL);
+
+    struct sigaction sa = { 0 };
+    sa.sa_flags = SA_ONSTACK | SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+
+    sa.sa_sigaction = sig_handler;
+    sigaction(SIGSEGV, &sa, NULL);
+
+    sa.sa_sigaction = sig_handler;
+    sigaction(SIGFPE, &sa, NULL);
+#else
+    ULONG size = 64 * 1024;
+    SetThreadStackGuarantee(&size);
+
+    handler = AddVectoredExceptionHandler(1, vector_handler);
+#endif
+
+    sig_jit = jit;
+  }
 
   return old;
 }
@@ -5115,6 +5213,19 @@ void* jit_push_jmp(Jit* jit, void* new)
 void jit_pop_jmp(Jit* jit, void* old)
 {
   jit->jmp = old;
+
+  if (!old)
+  {
+#ifdef _WIN32
+    RemoveVectoredExceptionHandler(handler);
+    _resetstkoflw();
+#else
+    sigaction(SIGSEGV, NULL, NULL);
+    sigaction(SIGFPE, NULL, NULL);
+#endif
+
+    sig_jit = NULL;
+  }
 }
 
 void jit_run(Jit* jit)
