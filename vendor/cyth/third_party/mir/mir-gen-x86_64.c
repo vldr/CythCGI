@@ -404,6 +404,12 @@ static void machinize_call (gen_ctx_t gen_ctx, MIR_insn_t call_insn) {
       if (type != MIR_T_RBLK) {
         new_arg_op = _MIR_new_var_op (ctx, arg_reg);
         new_insn = MIR_new_insn (ctx, new_insn_code, new_arg_op, arg_op);
+
+        if (prev_call_insn)
+        {
+          new_insn->line = prev_call_insn->line;
+          new_insn->column = prev_call_insn->column;
+        }
       } else {
         assert (arg_op.mode == MIR_OP_VAR_MEM);
         new_insn = MIR_new_insn (ctx, new_insn_code, _MIR_new_var_op (ctx, arg_reg),
@@ -699,7 +705,8 @@ static void target_machinize (gen_ctx_t gen_ctx) {
   func = curr_func_item->u.func;
   block_arg_func_p = FALSE;
   start_sp_from_bp_offset = 8;
-  keep_fp_p = func->vararg_p;
+  // keep_fp_p = func->vararg_p;
+  keep_fp_p = TRUE;
   for (i = 0; i < func->nargs; i++) {
     /* Argument extensions is already done in simplify */
     /* Prologue: generate arg_var = hard_reg|stack mem|stack addr ... */
@@ -2937,6 +2944,7 @@ static uint8_t *target_translate (gen_ctx_t gen_ctx, size_t *len) {
   }
   for (n = 0, insn = DLIST_HEAD (MIR_insn_t, curr_func_item->u.func->insns); insn != NULL;
        insn = DLIST_NEXT (MIR_insn_t, insn)) {
+    size_t len_before = VARR_LENGTH (uint8_t, result_code);
     if (insn->code == MIR_LABEL) {
       if (gen_nested_loop_label_p (gen_ctx, insn)) {
         int padn = LOOP_ALIGN - (int) (VARR_LENGTH (uint8_t, result_code) % LOOP_ALIGN);
@@ -2950,19 +2958,20 @@ static uint8_t *target_translate (gen_ctx_t gen_ctx, size_t *len) {
       if (MIR_branch_code_p (insn->code)) /* possible replacement change */
         ind = find_insn_pattern (gen_ctx, insn, NULL);
       gen_assert (ind >= 0);
-#ifndef NDEBUG
-      size_t len_before = VARR_LENGTH (uint8_t, result_code);
-#endif
+
       out_insn (gen_ctx, insn, patterns[ind].replacement, NULL);
-#ifndef NDEBUG
-      size_t insn_len = VARR_LENGTH (uint8_t, result_code) - len_before;
-      if (insn_len > (size_t) patterns[ind].max_insn_size && insn->code != MIR_SWITCH) {
-        // fprintf (stderr, "\"%s\" max size(%d) < real size(%d)\n", patterns[ind].replacement,
-        //          patterns[ind].max_insn_size, (int) insn_len);
-        // gen_assert (FALSE);
-      }
-#endif
+   
+// #ifndef NDEBUG
+//       if (insn_len > (size_t) patterns[ind].max_insn_size && insn->code != MIR_SWITCH) {
+//         fprintf (stderr, "\"%s\" max size(%d) < real size(%d)\n", patterns[ind].replacement,
+//                  patterns[ind].max_insn_size, (int) insn_len);
+//         gen_assert (FALSE);
+//       }
+// #endif
     }
+
+    size_t insn_len = VARR_LENGTH (uint8_t, result_code) - len_before;
+    insn->size = insn_len;
   }
   return translate_finish (gen_ctx, len);
 }

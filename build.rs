@@ -3,8 +3,8 @@ fn main() {
     build
         .opt_level(3)
         .warnings(false)
-        .flag_if_supported("-fsigned-char")
         .define("NDEBUG", None)
+        .flag_if_supported("-fsigned-char")
         .include("vendor/cyth/third_party/mir")
         .include("vendor/cyth/third_party/bdwgc/include")
         .file("vendor/cyth/src/checker.c")
