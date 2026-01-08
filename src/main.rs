@@ -33,13 +33,59 @@ struct Script {
 }
 
 unsafe extern "C" {
-    fn jit(source: *const c_char) -> *const c_void;
-    fn jit_set_function(jit: *const c_void, name: *const c_char, cb: *const c_void);
+    fn jit_init(
+        source: *const c_char,
+        error_callback: *const c_void,
+        panic_callback: *const c_void,
+    ) -> *const c_void;
+    fn jit_alloc(atomic: c_int, size: usize) -> *const c_void;
     fn jit_generate(jit: *const c_void, logging: c_int);
     fn jit_run(jit: *const c_void);
     fn jit_destroy(jit: *const c_void);
-    fn jit_alloc(atomic: c_int, size: usize) -> *const c_void;
-    fn set_error_callback(cb: *const c_void);
+    fn jit_set_function(jit: *const c_void, name: *const c_char, cb: *const c_void);
+}
+
+extern "C" fn error_callback(
+    start_line: c_int,
+    start_column: c_int,
+    end_line: c_int,
+    end_column: c_int,
+    message: *const c_char,
+) {
+    let context = unsafe { &mut *CONTEXT };
+
+    context.output.push_str(&format!(
+        "{}:{}:{}-{}:{}: {}\n",
+        context.path,
+        context.mapping[(start_line - 1) as usize].0,
+        context.mapping[(start_line - 1) as usize].1 + start_column,
+        context.mapping[(end_line - 1) as usize].0,
+        context.mapping[(end_line - 1) as usize].1 + end_column,
+        unsafe { CStr::from_ptr(message).to_str().unwrap() }
+    ));
+}
+
+extern "C" fn panic_callback(function: *const c_char, line: c_int, column: c_int) {
+    let context = unsafe { &mut *CONTEXT };
+
+    if line == 0 && column == 0 {
+        context
+            .headers
+            .push_str("Status: 500 Internal Server Error\n");
+        context.headers.push_str("Content-Type: text/plain\n");
+
+        context.output.clear();
+        context.output.push_str(&format!("{}\n", unsafe {
+            CStr::from_ptr(function).to_str().unwrap()
+        }));
+    } else {
+        context.output.push_str(&format!(
+            "  at {}:{}:{}\n",
+            unsafe { CStr::from_ptr(function).to_str().unwrap() },
+            context.mapping[(line - 1) as usize].0,
+            context.mapping[(line - 1) as usize].1 + column,
+        ));
+    }
 }
 
 fn cyth_new_string(s: &str) -> *mut u8 {
@@ -1078,7 +1124,13 @@ fn request(mut req: Request, context: &mut Context, scripts: &mut HashMap<String
         context.output.clear();
 
         let source = CString::new(source).unwrap();
-        let jit = unsafe { jit(source.as_ptr()) };
+        let jit = unsafe {
+            jit_init(
+                source.as_ptr(),
+                error_callback as *const c_void,
+                panic_callback as *const c_void,
+            )
+        };
         if jit.is_null() {
             write!(
                 &mut req.stdout(),
@@ -1120,31 +1172,11 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    unsafe extern "C" fn error(
-        start_line: c_int,
-        start_column: c_int,
-        end_line: c_int,
-        end_column: c_int,
-        message: *const c_char,
-    ) {
-        let context = unsafe { &mut *CONTEXT };
-        context.output.push_str(&format!(
-            "{}:{}:{}-{}:{}: {}\n",
-            context.path,
-            context.mapping[(start_line - 1) as usize].0,
-            context.mapping[(start_line - 1) as usize].1 + start_column,
-            context.mapping[(end_line - 1) as usize].0,
-            context.mapping[(end_line - 1) as usize].1 + end_column,
-            unsafe { CStr::from_ptr(message).to_str().unwrap() }
-        ));
-    }
-
     let context = Box::leak(Box::new(Context::default()));
     let mut scripts = HashMap::<String, Script>::new();
 
     unsafe {
         CONTEXT = context as *mut Context;
-        set_error_callback(error as *const c_void)
     };
 
     if env::args().count() > 1 {

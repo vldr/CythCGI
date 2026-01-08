@@ -10,7 +10,6 @@ fn main() {
         .file("vendor/cyth/src/checker.c")
         .file("vendor/cyth/src/environment.c")
         .file("vendor/cyth/src/lexer.c")
-        .file("vendor/cyth/src/main.c")
         .file("vendor/cyth/src/jit.c")
         .file("vendor/cyth/src/map.c")
         .file("vendor/cyth/src/memory.c")

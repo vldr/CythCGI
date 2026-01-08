@@ -11,7 +11,6 @@
 
 static struct
 {
-  bool error;
   ArrayStmt statements;
 
   Environment* environment;
@@ -21,9 +20,15 @@ static struct
   FuncStmt* function;
   ClassStmt* class;
   IfStmt* cond;
-  ClassTemplateStmt* class_template;
+  Token* template;
   WhileStmt* loop;
   AssignExpr* assignment;
+
+  bool error;
+  int errors;
+  void (*error_callback)(int start_line, int start_column, int end_line, int end_column,
+                         const char* message);
+
 } checker;
 
 static void check_statement(Stmt* statement, bool synchronize);
@@ -44,276 +49,269 @@ static bool autocast_int_literal_to_float_literal(Expr** expression);
 static const char* data_type_token_to_string(DataTypeToken type, ArrayChar* string);
 static DataType data_type_token_to_data_type(DataTypeToken type);
 
-static void checker_error(Token token, const char* message)
+static void error(Token token, const char* message)
 {
-  if (checker.error)
-    return;
-
-  if (checker.class_template && checker.class)
+  if (checker.template)
     message =
-      memory_sprintf("%s (occurred when creating %s at %d:%d)", message, checker.class->name.lexeme,
-                     checker.class->name.start_line, checker.class->name.start_column);
+      memory_sprintf("%s (occurred when creating %s at %d:%d)", message, checker.template->lexeme,
+                     checker.template->start_line, checker.template->start_column);
 
-  error(token.start_line, token.start_column, token.end_line, token.end_column, message);
+  if (!checker.error)
+    if (checker.error_callback)
+      checker.error_callback(token.start_line, token.start_column, token.end_line, token.end_column,
+                             message);
+
   checker.error = true;
+  checker.errors++;
 }
 
 static void error_type_mismatch(Token token, DataType expected, DataType got)
 {
-  checker_error(token, memory_sprintf("Mismatched types, expected '%s' but got '%s'.",
-                                      data_type_to_string(expected), data_type_to_string(got)));
+  error(token, memory_sprintf("Mismatched types, expected '%s' but got '%s'.",
+                              data_type_to_string(expected), data_type_to_string(got)));
 }
 
 static void error_should_not_return_value_in_top_level(Token token)
 {
-  checker_error(token, "Should not return a value here.");
+  error(token, "Should not return a value here.");
 }
 
 static void error_should_not_return_value(Token token, const char* function_name)
 {
-  checker_error(token,
-                memory_sprintf("Void function '%s' should not return a value.", function_name));
+  error(token, memory_sprintf("Void function '%s' should not return a value.", function_name));
 }
 
 static void error_should_return_value(Token token, const char* function_name)
 {
-  checker_error(token,
-                memory_sprintf("Non-void function '%s' should return a value.", function_name));
+  error(token, memory_sprintf("Non-void function '%s' should return a value.", function_name));
 }
 
 static void error_operation_not_defined(Token token, DataType data_type)
 {
-  checker_error(token, memory_sprintf("Operator '%s' is not defined for '%s'.", token.lexeme,
-                                      data_type_to_string(data_type)));
+  error(token, memory_sprintf("Operator '%s' is not defined for '%s'.", token.lexeme,
+                              data_type_to_string(data_type)));
 }
 
 static void error_unknown_operation(Token token)
 {
-  checker_error(token, memory_sprintf("Operator '%s' is not valid.", token.lexeme));
+  error(token, memory_sprintf("Operator '%s' is not valid.", token.lexeme));
 }
 
 static void error_missing_operator_overload(Token token, DataType left_data_type,
                                             DataType right_data_type, const char* function_name)
 {
-  checker_error(
-    token, memory_sprintf("Operator '%s' is not defined for '%s' and '%s' (missing %s method).",
-                          token.lexeme, data_type_to_string(left_data_type),
-                          data_type_to_string(right_data_type), function_name));
+  error(token, memory_sprintf("Operator '%s' is not defined for '%s' and '%s' (missing %s method).",
+                              token.lexeme, data_type_to_string(left_data_type),
+                              data_type_to_string(right_data_type), function_name));
 }
 
 static void error_name_already_exists(Token token, const char* name)
 {
-  checker_error(token, memory_sprintf("The name '%s' already exists.", name));
+  error(token, memory_sprintf("The name '%s' already exists.", name));
 }
 
 static void error_missing_template_types(Token token)
 {
-  checker_error(token, "Missing template types here.");
+  error(token, "Missing template types here.");
 }
 
 static void error_type_cannot_be_void(Token token)
 {
-  checker_error(token, "The type cannot be void here.");
+  error(token, "The type cannot be void here.");
 }
 
 static void error_cannot_find_name(Token token, const char* name)
 {
-  checker_error(token, memory_sprintf("Undeclared identifier '%s'.", name));
+  error(token, memory_sprintf("Undeclared identifier '%s'.", name));
 }
 
 static void error_cannot_access_name_outside_function(Token token, const char* name)
 {
-  checker_error(token,
-                memory_sprintf("Cannot access '%s' because it is outside of the function.", name));
+  error(token, memory_sprintf("Cannot access '%s' because it is outside of the function.", name));
 }
 
 static void error_cannot_find_member_name(Token token, const char* name, DataType data_type)
 {
-  checker_error(
-    token, memory_sprintf("No member named '%s' in '%s'.", name, data_type_to_string(data_type)));
+  error(token,
+        memory_sprintf("No member named '%s' in '%s'.", name, data_type_to_string(data_type)));
 }
 
 static void error_cannot_find_type(Token token, const char* name)
 {
-  checker_error(token, memory_sprintf("Undeclared type '%s'.", name));
+  error(token, memory_sprintf("Undeclared type '%s'.", name));
 }
 
 static void error_not_a_template_type(Token token, const char* name)
 {
-  checker_error(token, memory_sprintf("'%s' is not a template type.", name));
+  error(token, memory_sprintf("'%s' is not a template type.", name));
 }
 
 static void error_not_a_type(Token token, const char* name)
 {
-  checker_error(token, memory_sprintf("The name '%s' is not a type.", name));
+  error(token, memory_sprintf("The name '%s' is not a type.", name));
 }
 
 static void error_invalid_template_arity(Token token, int expected, int got)
 {
-  checker_error(token, memory_sprintf("Expected %d template %s but got %d.", expected,
-                                      expected == 1 ? "argument" : "arguments", got));
+  error(token, memory_sprintf("Expected %d template %s but got %d.", expected,
+                              expected == 1 ? "argument" : "arguments", got));
 }
 
 static void error_recursive_template_type(Token token, const char* name)
 {
-  checker_error(
-    token, memory_sprintf("Cannot instiantiate '%s' template, recursion limit reached.", name));
+  error(token, memory_sprintf("Cannot instiantiate '%s' template, recursion limit reached.", name));
 }
 
 static void error_not_a_function(Token token)
 {
-  checker_error(token, "The expression is not a function.");
+  error(token, "The expression is not a function.");
 }
 
 static void error_not_an_object(Token token)
 {
-  checker_error(token, "The expression is not an object.");
+  error(token, "The expression is not an object.");
 }
 
 static void error_not_indexable(Token token, DataType data_type)
 {
-  checker_error(token,
-                memory_sprintf("Cannot index into type '%s'.", data_type_to_string(data_type)));
+  error(token, memory_sprintf("Cannot index into type '%s'.", data_type_to_string(data_type)));
 }
 
 static void error_not_indexable_missing_overload(Token token, DataType index_data_type,
                                                  DataType value_data_type)
 {
   if (checker.assignment)
-    checker_error(token, memory_sprintf("The object cannot be indexed and assigned to, missing "
-                                        "'__set__' method that takes '%s' and '%s'.",
-                                        data_type_to_string(index_data_type),
-                                        data_type_to_string(value_data_type)));
+    error(token, memory_sprintf("The object cannot be indexed and assigned to, missing "
+                                "'__set__' method that takes '%s' and '%s'.",
+                                data_type_to_string(index_data_type),
+                                data_type_to_string(value_data_type)));
   else
-    checker_error(
-      token,
-      memory_sprintf("The object cannot be indexed, missing '__get__' method that takes '%s'.",
-                     data_type_to_string(index_data_type)));
+    error(token,
+          memory_sprintf("The object cannot be indexed, missing '__get__' method that takes '%s'.",
+                         data_type_to_string(index_data_type)));
 }
 
 static void error_index_not_an_int(Token token)
 {
-  checker_error(token, "The index must be of type 'int'.");
+  error(token, "The index must be of type 'int'.");
 }
 
 static void error_not_assignable(Token token)
 {
-  checker_error(token, "The expression is not assignable.");
+  error(token, "The expression is not assignable.");
 }
 
 static void error_unexpected_class(Token token)
 {
-  checker_error(token, "A class declaration is not allowed here.");
+  error(token, "A class declaration is not allowed here.");
 }
 
 static void error_unexpected_import(Token token)
 {
-  checker_error(token, "An import declaration is not allowed here.");
+  error(token, "An import declaration is not allowed here.");
 }
 
 static void error_unexpected_continue(Token token)
 {
-  checker_error(token, "A continue statement can only appear inside a loop.");
+  error(token, "A continue statement can only appear inside a loop.");
 }
 
 static void error_unexpected_break(Token token)
 {
-  checker_error(token, "A break statement can only appear inside a loop.");
+  error(token, "A break statement can only appear inside a loop.");
 }
 
 static void error_condition_is_not_bool(Token token)
 {
-  checker_error(token, "The condition expression must evaluate to a boolean.");
+  error(token, "The condition expression must evaluate to a boolean.");
 }
 
 static void error_invalid_initializer_return_type(Token token)
 {
-  checker_error(token, "The return type of '__init__' must be 'void'.");
+  error(token, "The return type of '__init__' must be 'void'.");
 }
 
 static void error_invalid_str_return_type(Token token)
 {
-  checker_error(token, "The return type of '__str__' must be 'string'.");
+  error(token, "The return type of '__str__' must be 'string'.");
 }
 
 static void error_invalid_get_arity(Token token)
 {
-  checker_error(token, "The '__get__' method must have one argument.");
+  error(token, "The '__get__' method must have one argument.");
 }
 
 static void error_invalid_set_arity(Token token)
 {
-  checker_error(token, "The '__set__' method must have two arguments.");
+  error(token, "The '__set__' method must have two arguments.");
 }
 
 static void error_invalid_str_arity(Token token)
 {
-  checker_error(token, "The '__str__' method must have no arguments.");
+  error(token, "The '__str__' method must have no arguments.");
 }
 
 static void error_invalid_binary_arity(Token token, const char* name)
 {
-  checker_error(token, memory_sprintf("The '%s' method must have one argument.", name));
+  error(token, memory_sprintf("The '%s' method must have one argument.", name));
 }
 
 static void error_invalid_arity(Token token, int expected, int got)
 {
-  checker_error(token, memory_sprintf("Expected %d %s but got %d.", expected,
-                                      expected == 1 ? "parameter" : "parameters", got));
+  error(token, memory_sprintf("Expected %d %s but got %d.", expected,
+                              expected == 1 ? "parameter" : "parameters", got));
 }
 
 static void error_invalid_type_conversion(Token token, DataType from, DataType to)
 {
-  checker_error(token, memory_sprintf("Invalid type conversion from '%s' to '%s'.",
-                                      data_type_to_string(from), data_type_to_string(to)));
+  error(token, memory_sprintf("Invalid type conversion from '%s' to '%s'.",
+                              data_type_to_string(from), data_type_to_string(to)));
 }
 
 static void error_imported_functions_cannot_have_bodies(Token token)
 {
-  checker_error(token, "An imported function cannot have a body.");
+  error(token, "An imported function cannot have a body.");
 }
 
 static void error_no_return(Token token)
 {
-  checker_error(token, "Non-void function must return a value.");
+  error(token, "Non-void function must return a value.");
 }
 
 static void error_array_type_is_unresolved(Token token)
 {
-  checker_error(token, "The array type is unresolved; add a cast to declare its type.");
+  error(token, "The array type is unresolved; add a cast to declare its type.");
 }
 
 static void error_type_is_not_assignable(Token token, DataType from, DataType to)
 {
-  checker_error(token, memory_sprintf("The type '%s' is not assignable to '%s'.",
-                                      data_type_to_string(from), data_type_to_string(to)));
+  error(token, memory_sprintf("The type '%s' is not assignable to '%s'.", data_type_to_string(from),
+                              data_type_to_string(to)));
 }
 
 static void error_ternary_type_mismatch(Token token, DataType left, DataType right)
 {
-  checker_error(token,
-                memory_sprintf("The ternary true type '%s' doesn't match the false type '%s'.",
-                               data_type_to_string(left), data_type_to_string(right)));
+  error(token, memory_sprintf("The ternary true type '%s' doesn't match the false type '%s'.",
+                              data_type_to_string(left), data_type_to_string(right)));
 }
 
 static void error_cannot_find_suitable_overload(Token name, DataType data_type)
 {
-  checker_error(
-    name, memory_sprintf("Cannot find a suitable overload: %s", data_type_to_string(data_type)));
+  error(name,
+        memory_sprintf("Cannot find a suitable overload: %s", data_type_to_string(data_type)));
 }
 
 static void error_overload_conflict(Token token, const char* name)
 {
-  checker_error(
-    token,
-    memory_sprintf("Cannot overload '%s', parameter types conflict with another function.", name));
+  error(token, memory_sprintf(
+                 "Cannot overload '%s', parameter types conflict with another function.", name));
 }
 
 static void error_ambiguous_call(Token token, const char* name)
 {
-  checker_error(token, memory_sprintf("Call of overloaded '%s' is ambiguous; "
-                                      "parameter types conflict with another function.",
-                                      name));
+  error(token, memory_sprintf("Call of overloaded '%s' is ambiguous; "
+                              "parameter types conflict with another function.",
+                              name));
 }
 
 static inline int align(int value, int alignment)
@@ -616,8 +614,9 @@ bool nullable_data_type(DataType data_type)
 
 bool boolable_data_type(DataType data_type)
 {
-  return nullable_data_type(data_type) || data_type.type == TYPE_INTEGER ||
-         data_type.type == TYPE_STRING || data_type.type == TYPE_BOOL;
+  return nullable_data_type(data_type) || data_type.type == TYPE_ARRAY ||
+         data_type.type == TYPE_INTEGER || data_type.type == TYPE_STRING ||
+         data_type.type == TYPE_BOOL;
 }
 
 bool assignable_data_type(Expr** expression, DataType destination, DataType source)
@@ -815,6 +814,13 @@ static DataType class_template_to_data_type(DataType template, DataTypeToken tem
   checker.cond = NULL;
   checker.environment = checker.global_environment;
 
+  Token* previous_template = checker.template;
+  if (!previous_template)
+  {
+    checker.template = ALLOC(Token);
+    *checker.template = class_statement->name;
+  }
+
   init_class_declaration(class_statement);
 
   checker.environment = environment_init(previous_environment);
@@ -849,6 +855,9 @@ static DataType class_template_to_data_type(DataType template, DataTypeToken tem
   checker.cond = previous_cond;
   checker.environment = previous_environment;
 
+  if (!previous_template)
+    checker.template = NULL;
+
   array_add(&template.class_template->classes, class_statement);
 
   variable = environment_get_variable(checker.environment, name);
@@ -868,6 +877,20 @@ static DataType function_template_to_data_type(DataType template, DataTypeToken 
                    variable->data_type.type == TYPE_FUNCTION_MEMBER))
   {
     return variable->data_type;
+  }
+
+  DataType** template_data_types =
+    alloca(template.function_template.function->types.size * sizeof(DataType*));
+
+  for (unsigned int i = 0; i < template.function_template.function->types.size; i++)
+  {
+    DataType template_data_type = data_type_token_to_data_type(array_at(&function_type.types, i));
+
+    if (checker.error)
+      return DATA_TYPE(TYPE_VOID);
+
+    template_data_types[i] = ALLOC(DataType);
+    *template_data_types[i] = template_data_type;
   }
 
   Stmt* statement = parser_parse_function_declaration_statement(
@@ -896,10 +919,17 @@ static DataType function_template_to_data_type(DataType template, DataTypeToken 
   checker.cond = template.function_template.function->cond;
   checker.environment = template.function_template.function->environment;
 
+  Token* previous_template = checker.template;
+  if (!previous_template)
+  {
+    checker.template = ALLOC(Token);
+    *checker.template = function_statement->name;
+  }
+
   for (unsigned int i = 0; i < template.function_template.function->types.size; i++)
   {
     Token name = template.function_template.function->types.elems[i];
-    DataTypeToken actual_data_type_token = array_at(&function_type.types, i);
+    DataTypeToken data_type_token = array_at(&function_type.types, i);
 
     VarStmt* variable = ALLOC(VarStmt);
     variable->name = name;
@@ -909,9 +939,8 @@ static DataType function_template_to_data_type(DataType template, DataTypeToken 
     variable->scope = SCOPE_GLOBAL;
     variable->index = -1;
     variable->data_type.type = TYPE_ALIAS;
-    variable->data_type.alias.token = actual_data_type_token;
-    variable->data_type.alias.data_type = ALLOC(DataType);
-    *variable->data_type.alias.data_type = data_type_token_to_data_type(actual_data_type_token);
+    variable->data_type.alias.token = data_type_token;
+    variable->data_type.alias.data_type = template_data_types[i];
 
     environment_set_variable(checker.environment, variable->name.lexeme, variable);
   }
@@ -933,6 +962,9 @@ static DataType function_template_to_data_type(DataType template, DataTypeToken 
   checker.loop = previous_loop;
   checker.cond = previous_cond;
   checker.environment = previous_environment;
+
+  if (!previous_template)
+    checker.template = NULL;
 
   array_add(&template.function_template.function->functions, function_statement);
 
@@ -1216,7 +1248,7 @@ static bool autocast(Expr** expression, DataType from, DataType to)
 static bool autocast_int_literal_to_float_literal(Expr** expression)
 {
   if (expression == NULL)
-    return false;
+    return true;
 
   Expr* expr = *expression;
   if (expr->type == EXPR_LITERAL)
@@ -1303,6 +1335,87 @@ static void expand_function_group(DataType* data_type, DataType* argument_data_t
           *data_type = function_data_type;
       }
     }
+
+    array_foreach(&function_group, function_data_type)
+    {
+      if (function_data_type.type == TYPE_FUNCTION ||
+          function_data_type.type == TYPE_FUNCTION_MEMBER)
+      {
+        FuncStmt* function = function_data_type.type == TYPE_FUNCTION
+                               ? function_data_type.function
+                               : function_data_type.function_member.function;
+
+        int offset = function_data_type.type == TYPE_FUNCTION_MEMBER ? 1 : 0;
+        bool match = true;
+
+        if (function->parameters.size - offset == number_of_arguments)
+        {
+          for (unsigned int i = offset; i < function->parameters.size; i++)
+          {
+            DataType argument_data_type = argument_data_types[i - offset];
+            DataType parameter_data_type = function->parameters.elems[i]->data_type;
+
+            if (!equal_data_type(parameter_data_type, argument_data_type))
+            {
+              match = false;
+              break;
+            }
+          }
+        }
+        else
+        {
+          match = false;
+        }
+
+        if (match)
+          *data_type = function_data_type;
+      }
+    }
+  }
+}
+
+static void expand_exact_function_group(DataType* data_type, DataType* argument_data_types,
+                                        unsigned int number_of_arguments)
+{
+  if (data_type->type == TYPE_FUNCTION_GROUP)
+  {
+    ArrayDataType function_group = data_type->function_group;
+    DataType function_data_type;
+
+    array_foreach(&function_group, function_data_type)
+    {
+      if (function_data_type.type == TYPE_FUNCTION ||
+          function_data_type.type == TYPE_FUNCTION_MEMBER)
+      {
+        FuncStmt* function = function_data_type.type == TYPE_FUNCTION
+                               ? function_data_type.function
+                               : function_data_type.function_member.function;
+
+        bool match = true;
+
+        if (function->parameters.size == number_of_arguments)
+        {
+          for (unsigned int i = 0; i < function->parameters.size; i++)
+          {
+            DataType argument_data_type = argument_data_types[i];
+            DataType parameter_data_type = function->parameters.elems[i]->data_type;
+
+            if (!equal_data_type(parameter_data_type, argument_data_type))
+            {
+              match = false;
+              break;
+            }
+          }
+        }
+        else
+        {
+          match = false;
+        }
+
+        if (match)
+          *data_type = function_data_type;
+      }
+    }
   }
 }
 
@@ -1360,6 +1473,11 @@ static void expand_template_types(ArrayDataTypeToken* types, DataType* data_type
       .types = *types,
     };
 
+    function_type.token.start_line = name.start_line;
+    function_type.token.start_column = name.start_column;
+    function_type.token.end_line = name.end_line;
+    function_type.token.end_column = name.end_column;
+
     *data_type = function_template_to_data_type(*data_type, function_type, false);
   }
   else if (data_type->type == TYPE_FUNCTION_GROUP)
@@ -1388,8 +1506,20 @@ static void expand_template_types(ArrayDataTypeToken* types, DataType* data_type
             .types = *types,
           };
 
+          function_type.token.start_line = name.start_line;
+          function_type.token.start_column = name.start_column;
+          function_type.token.end_line = name.end_line;
+          function_type.token.end_column = name.end_column;
+
           DataType function_data_type =
             function_template_to_data_type(function_template_data_type, function_type, true);
+
+          if (checker.error)
+          {
+            checker.error = false;
+            continue;
+          }
+
           FuncStmt* function = function_data_type.type == TYPE_FUNCTION_MEMBER
                                  ? function_data_type.function_member.function
                                  : function_data_type.function;
@@ -1757,11 +1887,11 @@ static void init_variable_declaration(VarStmt* statement)
   else
   {
     statement->data_type = data_type_token_to_data_type(statement->type);
-  }
 
-  if (statement->data_type.type == TYPE_VOID)
-  {
-    error_type_cannot_be_void(statement->type.token);
+    if (statement->data_type.type == TYPE_VOID)
+    {
+      error_type_cannot_be_void(statement->type.token);
+    }
   }
 
   if (checker.function)
@@ -1998,9 +2128,9 @@ static DataType check_cast_expression(CastExpr* expression)
       {
       case TYPE_FUNCTION_POINTER: {
         DataType function_data_type = expression->from_data_type;
-        expand_function_group(&function_data_type,
-                              expression->to_data_type.function_internal.parameter_types.elems,
-                              expression->to_data_type.function_internal.parameter_types.size);
+        expand_exact_function_group(
+          &function_data_type, expression->to_data_type.function_internal.parameter_types.elems,
+          expression->to_data_type.function_internal.parameter_types.size);
 
         if (function_data_type.type != TYPE_FUNCTION_GROUP)
         {
@@ -2026,9 +2156,6 @@ static DataType check_cast_expression(CastExpr* expression)
       break;
 
     case TYPE_ALIAS:
-    case TYPE_FUNCTION:
-    case TYPE_FUNCTION_MEMBER:
-    case TYPE_FUNCTION_INTERNAL:
     case TYPE_FUNCTION_TEMPLATE:
     case TYPE_PROTOTYPE:
     case TYPE_PROTOTYPE_TEMPLATE:
@@ -2036,6 +2163,25 @@ static DataType check_cast_expression(CastExpr* expression)
       {
       case TYPE_STRING:
         valid = true;
+        break;
+
+      default:
+        break;
+      }
+
+      break;
+
+    case TYPE_FUNCTION:
+    case TYPE_FUNCTION_MEMBER:
+    case TYPE_FUNCTION_INTERNAL:
+      switch (expression->to_data_type.type)
+      {
+      case TYPE_STRING:
+        valid = true;
+        break;
+
+      case TYPE_FUNCTION_POINTER:
+        valid = equal_data_type(expression->from_data_type, expression->to_data_type);
         break;
 
       default:
@@ -2281,6 +2427,7 @@ skip:
         !upcast_boolable_to_bool(expression, &left, &right, DATA_TYPE(TYPE_STRING)) &&
         !upcast_boolable_to_bool(expression, &left, &right, DATA_TYPE(TYPE_FUNCTION_POINTER)) &&
         !upcast_boolable_to_bool(expression, &left, &right, DATA_TYPE(TYPE_OBJECT)) &&
+        !upcast_boolable_to_bool(expression, &left, &right, DATA_TYPE(TYPE_ARRAY)) &&
         !upcast_boolable_to_bool(expression, &left, &right, DATA_TYPE(TYPE_ANY)) &&
         !upcast_boolable_to_bool(expression, &left, &right, DATA_TYPE(TYPE_NULL)))
     {
@@ -2764,7 +2911,7 @@ static DataType check_access_expression(AccessExpr* expression)
 {
   DataType data_type = check_expression(expression->expr);
 
-  if (data_type.type == TYPE_OBJECT)
+  if (data_type.type == TYPE_OBJECT || data_type.type == TYPE_PROTOTYPE)
   {
     const char* name = expression->name.lexeme;
 
@@ -2772,6 +2919,14 @@ static DataType check_access_expression(AccessExpr* expression)
     VarStmt* variable = map_get_var_stmt(class->members, name);
 
     if (!variable)
+    {
+      error_cannot_find_member_name(expression->name, name, data_type);
+      return DATA_TYPE(TYPE_VOID);
+    }
+
+    if (data_type.type == TYPE_PROTOTYPE && (variable->data_type.type != TYPE_FUNCTION_TEMPLATE &&
+                                             variable->data_type.type != TYPE_FUNCTION_MEMBER &&
+                                             variable->data_type.type != TYPE_FUNCTION_GROUP))
     {
       error_cannot_find_member_name(expression->name, name, data_type);
       return DATA_TYPE(TYPE_VOID);
@@ -3812,16 +3967,11 @@ static void check_class_declaration(ClassStmt* statement)
 
 static void check_class_template_declaration(ClassTemplateStmt* statement)
 {
-  ClassTemplateStmt* previous_class_template = checker.class_template;
-  checker.class_template = statement;
-
   ClassStmt* class_statement;
   array_foreach(&statement->classes, class_statement)
   {
     check_class_declaration(class_statement);
   }
-
-  checker.class_template = previous_class_template;
 }
 
 static void check_import_declaration(ImportStmt* statement)
@@ -4072,15 +4222,21 @@ void checker_init_globals(void)
   }
 }
 
-void checker_init(ArrayStmt statements)
+void checker_init(ArrayStmt statements,
+                  void (*error_callback)(int start_line, int start_column, int end_line,
+                                         int end_column, const char* message))
 {
-  checker.error = false;
   checker.function = NULL;
+  checker.template = NULL;
   checker.class = NULL;
   checker.loop = NULL;
   checker.cond = NULL;
   checker.assignment = NULL;
   checker.statements = statements;
+
+  checker.errors = 0;
+  checker.error = false;
+  checker.error_callback = error_callback;
 
   checker.environment = environment_init(NULL);
   checker.global_environment = checker.environment;
@@ -4088,6 +4244,11 @@ void checker_init(ArrayStmt statements)
   array_init(&checker.global_locals);
 
   checker_init_globals();
+}
+
+int checker_errors(void)
+{
+  return checker.errors;
 }
 
 void checker_validate(void)
