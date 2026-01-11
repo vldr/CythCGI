@@ -29,6 +29,7 @@ use uuid::Uuid;
 struct Script {
     modified: SystemTime,
     text: Rc<Vec<String>>,
+    mapping: Rc<Vec<(i32, i32)>>,
     jit: *const c_void,
 }
 
@@ -193,7 +194,7 @@ struct Context {
     environs: Rc<HashMap<String, String>>,
     connections: Vec<ConnectionThreadSafe>,
     statements: Vec<Statement>,
-    mapping: Vec<(i32, i32)>,
+    mapping: Rc<Vec<(i32, i32)>>,
     path: String,
 }
 
@@ -445,7 +446,7 @@ class Map<K, V>
 
 static mut CONTEXT: *mut Context = ptr::null_mut();
 
-fn read_script(path: &String) -> (String, Vec<String>, Vec<(i32, i32)>) {
+fn read_script(path: &String) -> (String, Vec<String>, Rc<Vec<(i32, i32)>>) {
     fn dedent(
         input: &str,
         mapping: &mut Vec<(i32, i32)>,
@@ -557,12 +558,13 @@ fn read_script(path: &String) -> (String, Vec<String>, Vec<(i32, i32)>) {
 
     mapping.push((line, column - 1));
 
-    (output, text, mapping)
+    (output, text, Rc::new(mapping))
 }
 
 fn run_script(req: &mut Request, context: &mut Context, script: &Script) {
     let instant = Instant::now();
     context.text = script.text.clone();
+    context.mapping = script.mapping.clone();
     context.environs = req.params();
     context.headers.clear();
     context.output.clear();
@@ -599,7 +601,7 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.print").unwrap().as_ptr(),
+            CString::new("std.print.void(string)").unwrap().as_ptr(),
             print as *const c_void,
         );
 
@@ -610,7 +612,7 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.println").unwrap().as_ptr(),
+            CString::new("std.println.void(string)").unwrap().as_ptr(),
             println as *const c_void,
         );
 
@@ -623,7 +625,9 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.printInternal").unwrap().as_ptr(),
+            CString::new("std.printInternal.void(int)")
+                .unwrap()
+                .as_ptr(),
             print_internal as *const c_void,
         );
 
@@ -635,7 +639,9 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.urlEncode").unwrap().as_ptr(),
+            CString::new("std.urlEncode.string(string)")
+                .unwrap()
+                .as_ptr(),
             url_encode as *const c_void,
         );
 
@@ -651,7 +657,9 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.urlDecode").unwrap().as_ptr(),
+            CString::new("std.urlDecode.string(string)")
+                .unwrap()
+                .as_ptr(),
             url_decode as *const c_void,
         );
 
@@ -673,7 +681,9 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.markdown").unwrap().as_ptr(),
+            CString::new("std.markdown.string(string)")
+                .unwrap()
+                .as_ptr(),
             markdown as *const c_void,
         );
 
@@ -684,7 +694,7 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.hash").unwrap().as_ptr(),
+            CString::new("std.hash.string(string)").unwrap().as_ptr(),
             hash as *const c_void,
         );
 
@@ -697,7 +707,9 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.verify").unwrap().as_ptr(),
+            CString::new("std.verify.bool(string, string)")
+                .unwrap()
+                .as_ptr(),
             verify as *const c_void,
         );
 
@@ -708,7 +720,7 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.body").unwrap().as_ptr(),
+            CString::new("std.body.string()").unwrap().as_ptr(),
             body as *const c_void,
         );
 
@@ -721,7 +733,7 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.query").unwrap().as_ptr(),
+            CString::new("std.query.string()").unwrap().as_ptr(),
             query as *const c_void,
         );
 
@@ -734,7 +746,7 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.header").unwrap().as_ptr(),
+            CString::new("std.header.void(string)").unwrap().as_ptr(),
             header as *const c_void,
         );
 
@@ -764,7 +776,7 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.cookie").unwrap().as_ptr(),
+            CString::new("std.cookie.string(string)").unwrap().as_ptr(),
             cookie as *const c_void,
         );
 
@@ -774,7 +786,7 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.uuid").unwrap().as_ptr(),
+            CString::new("std.uuid.string()").unwrap().as_ptr(),
             uuid as *const c_void,
         );
 
@@ -790,7 +802,9 @@ fn link_script(jit: *const c_void) {
 
         jit_set_function(
             jit,
-            CString::new("std.getEnviron").unwrap().as_ptr(),
+            CString::new("std.getEnviron.string(string)")
+                .unwrap()
+                .as_ptr(),
             get_environ as *const c_void,
         );
 
@@ -802,7 +816,7 @@ fn link_script(jit: *const c_void) {
 
         jit_set_function(
             jit,
-            CString::new("std.getEnvirons").unwrap().as_ptr(),
+            CString::new("std.getEnvirons.string[]()").unwrap().as_ptr(),
             get_environs as *const c_void,
         );
 
@@ -815,7 +829,9 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.date").unwrap().as_ptr(),
+            CString::new("std.date.string(int, string)")
+                .unwrap()
+                .as_ptr(),
             date as *const c_void,
         );
 
@@ -827,7 +843,7 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.now").unwrap().as_ptr(),
+            CString::new("std.now.int()").unwrap().as_ptr(),
             now as *const c_void,
         );
 
@@ -850,7 +866,7 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.sqliteOpen").unwrap().as_ptr(),
+            CString::new("std.sqliteOpen.int(string)").unwrap().as_ptr(),
             sqlite_open as *const c_void,
         );
 
@@ -865,7 +881,9 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.sqliteExecute").unwrap().as_ptr(),
+            CString::new("std.sqliteExecute.bool(int, string)")
+                .unwrap()
+                .as_ptr(),
             sqlite_execute as *const c_void,
         );
 
@@ -896,7 +914,9 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.sqlitePrepare").unwrap().as_ptr(),
+            CString::new("std.sqlitePrepare.int(int, string)")
+                .unwrap()
+                .as_ptr(),
             sqlite_prepare as *const c_void,
         );
 
@@ -910,7 +930,9 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.sqliteBind<int>").unwrap().as_ptr(),
+            CString::new("std.sqliteBind<int>.bool(int, int, int)")
+                .unwrap()
+                .as_ptr(),
             sqlite_bind_int as *const c_void,
         );
 
@@ -924,7 +946,9 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.sqliteBind<float>").unwrap().as_ptr(),
+            CString::new("std.sqliteBind<float>.bool(int, int, float)")
+                .unwrap()
+                .as_ptr(),
             sqlite_bind_float as *const c_void,
         );
 
@@ -939,7 +963,9 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.sqliteBind<char[]>").unwrap().as_ptr(),
+            CString::new("std.sqliteBind<char[]>.bool(int, int, char[])")
+                .unwrap()
+                .as_ptr(),
             sqlite_bind_char as *const c_void,
         );
 
@@ -958,7 +984,9 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.sqliteBind<string>").unwrap().as_ptr(),
+            CString::new("std.sqliteBind<string>.bool(int, int, string)")
+                .unwrap()
+                .as_ptr(),
             sqlite_bind_string as *const c_void,
         );
 
@@ -974,7 +1002,9 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.sqliteBindNull").unwrap().as_ptr(),
+            CString::new("std.sqliteBindNull.bool(int, int)")
+                .unwrap()
+                .as_ptr(),
             sqlite_bind_null as *const c_void,
         );
 
@@ -999,7 +1029,7 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.sqliteNext").unwrap().as_ptr(),
+            CString::new("std.sqliteNext.bool(int)").unwrap().as_ptr(),
             sqlite_next as *const c_void,
         );
 
@@ -1014,7 +1044,9 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.sqliteRead<int>").unwrap().as_ptr(),
+            CString::new("std.sqliteRead<int>.int(int, string)")
+                .unwrap()
+                .as_ptr(),
             sqlite_read_int as *const c_void,
         );
 
@@ -1029,7 +1061,9 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.sqliteRead<float>").unwrap().as_ptr(),
+            CString::new("std.sqliteRead<float>.float(int, string)")
+                .unwrap()
+                .as_ptr(),
             sqlite_read_float as *const c_void,
         );
 
@@ -1045,7 +1079,9 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.sqliteRead<char[]>").unwrap().as_ptr(),
+            CString::new("std.sqliteRead<char[]>.char[](int, string)")
+                .unwrap()
+                .as_ptr(),
             sqlite_read_char as *const c_void,
         );
 
@@ -1060,7 +1096,9 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.sqliteRead<string>").unwrap().as_ptr(),
+            CString::new("std.sqliteRead<string>.string(int, string)")
+                .unwrap()
+                .as_ptr(),
             sqlite_read_string as *const c_void,
         );
 
@@ -1077,7 +1115,9 @@ fn link_script(jit: *const c_void) {
         }
         jit_set_function(
             jit,
-            CString::new("std.sqliteReadNull").unwrap().as_ptr(),
+            CString::new("std.sqliteReadNull.bool(int, string)")
+                .unwrap()
+                .as_ptr(),
             sqlite_read_null as *const c_void,
         );
 
@@ -1120,7 +1160,7 @@ fn request(mut req: Request, context: &mut Context, scripts: &mut HashMap<String
         let (source, text, mapping) = read_script(&path);
 
         context.path = path;
-        context.mapping = mapping;
+        context.mapping = mapping.clone();
         context.output.clear();
 
         let source = CString::new(source).unwrap();
@@ -1152,6 +1192,7 @@ fn request(mut req: Request, context: &mut Context, scripts: &mut HashMap<String
         let script = Script {
             modified: metadata.modified().unwrap(),
             text: text.into(),
+            mapping,
             jit,
         };
 

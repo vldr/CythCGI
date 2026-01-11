@@ -4865,9 +4865,12 @@ static void init_function_declaration(Jit* jit, FuncStmt* statement)
   MIR_type_t res_types[] = { statement->import ? data_type_to_sized_mir_type(statement->data_type)
                                                : data_type_to_mir_type(statement->data_type) };
 
-  statement->proto =
-    MIR_new_proto_arr(jit->ctx, memory_sprintf("%s.proto", statement->name.lexeme),
-                      statement->data_type.type != TYPE_VOID, res_types, vars.size, vars.elems);
+  statement->proto = MIR_new_proto_arr(
+    jit->ctx,
+    memory_sprintf("%s.proto", statement->import ? memory_sprintf("%s.%s", statement->import,
+                                                                  statement->name.lexeme)
+                                                 : statement->name.lexeme),
+    statement->data_type.type != TYPE_VOID, res_types, vars.size, vars.elems);
 
   if (statement->import)
   {
@@ -5007,8 +5010,10 @@ static void init_variable_declaration(Jit* jit, VarStmt* statement)
   if (statement->scope == SCOPE_GLOBAL)
   {
     uint64_t init = 0;
-    statement->item = MIR_new_data(jit->ctx, statement->name.lexeme,
-                                   data_type_to_mir_type(statement->data_type), 1, &init);
+    statement->item = MIR_new_data(
+      jit->ctx,
+      memory_sprintf("%s.%s", statement->name.lexeme, data_type_to_string(statement->data_type)),
+      data_type_to_mir_type(statement->data_type), 1, &init);
   }
   else
   {
@@ -5054,10 +5059,8 @@ static void init_statements(Jit* jit, ArrayStmt* statements)
 
 static void panic(Jit* jit, const char* what, uintptr_t pc, uintptr_t fp)
 {
-  if (!jit->panic_callback)
-    return;
-
-  jit->panic_callback(what, 0, 0);
+  if (jit->panic_callback)
+    jit->panic_callback(what, 0, 0);
 
   for (MIR_item_t item = DLIST_TAIL(MIR_item_t, jit->module->items); item != NULL;
        item = DLIST_PREV(MIR_item_t, item))
@@ -5074,7 +5077,8 @@ static void panic(Jit* jit, const char* what, uintptr_t pc, uintptr_t fp)
       if (pc >= ptr && pc < ptr + insn->size)
       {
         if (insn->line && insn->column)
-          jit->panic_callback(item->u.func->name, insn->line, insn->column);
+          if (jit->panic_callback)
+            jit->panic_callback(item->u.func->name, insn->line, insn->column);
       }
 
       offset += insn->size;
@@ -5113,7 +5117,8 @@ static void panic(Jit* jit, const char* what, uintptr_t pc, uintptr_t fp)
         if (pc >= ptr && pc < ptr + insn->size)
         {
           if (insn->line && insn->column)
-            jit->panic_callback(item->u.func->name, insn->line, insn->column);
+            if (jit->panic_callback)
+              jit->panic_callback(item->u.func->name, insn->line, insn->column);
         }
       }
     }
