@@ -337,6 +337,8 @@ static const struct insn_desc insn_descs[] = {
   {MIR_PRBNE, "prbne", {MIR_OP_LABEL, MIR_OP_UNDEF, MIR_OP_INT, MIR_OP_BOUND}},
   {MIR_USE, "use", {MIR_OP_BOUND}},
   {MIR_PHI, "phi", {MIR_OP_BOUND}},
+  {MIR_CCLEAR, "cclear", {MIR_OP_INT | OUT_FLAG, MIR_OP_INT,MIR_OP_INT, MIR_OP_INT, MIR_OP_BOUND}},
+  {MIR_FSQRT, "fsqrt", {MIR_OP_FLOAT | OUT_FLAG, MIR_OP_FLOAT, MIR_OP_BOUND}},
   {MIR_INVALID_INSN, "invalid-insn", {MIR_OP_BOUND}},
 };
 
@@ -3868,7 +3870,7 @@ static void set_inline_reg_map (MIR_context_t ctx, MIR_reg_t old_reg, MIR_reg_t 
 #endif
 
 #ifndef MIR_MAX_INSNS_FOR_CALL_INLINE
-#define MIR_MAX_INSNS_FOR_CALL_INLINE 50
+#define MIR_MAX_INSNS_FOR_CALL_INLINE 100
 #endif
 
 #ifndef MIR_MAX_FUNC_INLINE_GROWTH
@@ -4038,7 +4040,8 @@ static void process_inlines (MIR_context_t ctx, MIR_item_t func_item) {
   mir_assert (func_item->item_type == MIR_func_item);
   vn_empty (ctx);
   func = func_item->u.func;
-  original_func_insns_num = func_insns_num = DLIST_LENGTH (MIR_insn_t, func->insns);
+  original_func_insns_num = DLIST_LENGTH (MIR_insn_t, func->insns);
+  func_insns_num = 0;
   func_top_alloca = func_alloca_features (ctx, func, &func_top_alloca_used_p, NULL, &alloca_size);
   mir_assert (func_top_alloca != NULL || !func_top_alloca_used_p);
   init_func_top_alloca_size = curr_func_top_alloca_size = max_func_top_alloca_size = 0;
@@ -4081,8 +4084,7 @@ static void process_inlines (MIR_context_t ctx, MIR_item_t func_item) {
     if (called_func->first_lref != NULL || called_func->vararg_p || called_func->jret_p
         || called_func_insns_num > (func_insn->code != MIR_CALL ? MIR_MAX_INSNS_FOR_INLINE
                                                                 : MIR_MAX_INSNS_FOR_CALL_INLINE)
-        || (func_insns_num > MIR_MAX_FUNC_INLINE_GROWTH * original_func_insns_num / 100
-            && func_insns_num > MIR_MAX_CALLER_SIZE_FOR_ANY_GROWTH_INLINE)) {
+        || func_insns_num > MIR_MAX_CALLER_SIZE_FOR_ANY_GROWTH_INLINE) {
       simplify_op (ctx, func_item, func_insn, 1, FALSE, func_insn->code, FALSE, TRUE);
       continue;
     }
@@ -6930,19 +6932,6 @@ void _MIR_dump_code (const char *name, uint8_t *code, size_t code_len) {
 #include "mir-x86_64.c"
 #elif defined(__aarch64__) || defined(_M_ARM64)
 #include "mir-aarch64.c"
-#elif defined(__PPC64__)
-#include "mir-ppc64.c"
-#elif defined(__s390x__)
-#include "mir-s390x.c"
-#elif defined(__riscv)
-#if __riscv_xlen != 64 || __riscv_flen < 64 || !__riscv_float_abi_double || !__riscv_mul \
-  || !__riscv_div || !__riscv_compressed
-#error "only 64-bit RISCV supported (at least rv64imafdc)"
-#endif
-#if __riscv_flen == 128
-#error "RISCV 128-bit floats (Q set) is not supported"
-#endif
-#include "mir-riscv64.c"
 #else
 #error "undefined or unsupported generation target"
 #endif

@@ -3692,7 +3692,7 @@ static BinaryenExpressionRef generate_binary_expression(BinaryExpr* expression)
   BinaryenExpressionRef right = generate_expression(expression->right);
   BinaryenOp op = 0;
 
-  DataType data_type = expression->operand_data_type;
+  DataType data_type = expression->left_data_type;
 
   switch (expression->op.type)
   {
@@ -5176,7 +5176,7 @@ int cyth_wasm_init(char* source,
     return false;
   }
 
-  checker_init(statements, error_callback);
+  checker_init(statements, error_callback, NULL);
   checker_validate();
 
   if (checker_errors())
