@@ -5,7 +5,7 @@ hello world
 int[] a = [1,2,3]
 print(body())
 
-header("Poop: " + uuid())
+header("UUID: " + uuid())
 
 Database connection = Database(":memory:")
 bool result = connection.execute("
