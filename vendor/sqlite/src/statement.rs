@@ -22,8 +22,6 @@ pub struct Statement {
     pub(crate) column_names: Arc<Vec<String>>,
     column_mapping: Arc<HashMap<String, usize>>,
 }
-unsafe impl Send for Statement {}
-unsafe impl Sync for Statement {}
 
 /// A type suitable for binding to a prepared statement.
 pub trait Bindable {
