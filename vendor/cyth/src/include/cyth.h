@@ -9,7 +9,6 @@
 extern "C"
 {
 #endif
-#ifndef EMSCRIPTEN
   typedef struct _JIT Jit;
   typedef struct _STRING
   {
@@ -74,6 +73,7 @@ extern "C"
   void cyth_generate(Jit* jit, int logging);
 
   // Runs the top-level scope of the program (which is the <start> function).
+  //
   // This can only be called on a single thread.
   void cyth_run(Jit* jit);
 
@@ -85,12 +85,14 @@ extern "C"
 
   // Allocates a block of memory and returns a pointer to that memory.
   //
-  // This memory will be automatically cleaned up by the garbage collector.
+  // This memory is managed by the garbage collector and will be automatically
+  // cleaned up.
+  //
   // Do not store the returned pointer outside the program as the garbage
-  // collector won't be able to find it.
+  // collector won't be able to find it and might prematurely deallocate it.
   //
   // [atomic] is 0, if the memory you're allocating contains pointers to
-  // heap allocated like arrays and objects.
+  // heap allocated strings, arrays and objects.
   //
   // It is 1, if the memory you're allocating does NOT contain any pointers.
   //
@@ -115,7 +117,8 @@ extern "C"
   //
   // The corresponding C code would look like:
   //
-  //    int(*)(int, int) adder = (int(*)(int, int)) cyth_get_function(jit, "adder.int(int, int)");
+  //    typedef int (*Func)(int, int);
+  //    Func adder = (Func) cyth_get_function(jit, "adder.int(int, int)");
   //
   //    cyth_try_catch(jit, {
   //      adder(10, 10);
@@ -130,7 +133,7 @@ extern "C"
   // You MUST call "cyth_run" before accessing global variables, otherwise
   // they will be uninitialized.
   //
-  // [name] must be in the format: <function name>.<signature>
+  // [name] must be in the format: <variable name>.<signature>
   //
   // For example, if I have the following Cyth code:
   //
@@ -138,7 +141,7 @@ extern "C"
   //
   // The corresponding C code would look like:
   //
-  //    cyth_get_variable(jit, "globalVariable.int");
+  //    int* myVariable = (int*) cyth_get_variable(jit, "globalVariable.int");
   //
   uintptr_t cyth_get_variable(Jit* jit, const char* name);
 
@@ -164,8 +167,8 @@ extern "C"
 #define cyth_try_catch(_jit, _block)                                                               \
   do                                                                                               \
   {                                                                                                \
-    void* cyth_push_jmp(Jit * jit, void* new_jmp);                                                 \
-    void cyth_pop_jmp(Jit * jit, void* old_jmp);                                                   \
+    void* cyth_push_jmp(Jit* jit, void* new_jmp);                                                  \
+    void cyth_pop_jmp(Jit* jit, void* old_jmp);                                                    \
                                                                                                    \
     jmp_buf _new;                                                                                  \
     jmp_buf* _old = (jmp_buf*)cyth_push_jmp(_jit, (void*)&_new);                                   \
@@ -192,10 +195,10 @@ extern "C"
 #define cyth_longjmp siglongjmp
 #endif
 #endif
-
-#ifdef WASM
   // Initializes a WASM code generation instance.
   // This will return 0, if a compilation error has occurred. Otherwise, it will return 1.
+  //
+  // Note: You have to compile with -DWASM=1 to have access to the WASM backend.
   //
   // [source] is the source code to be compiled.
   //
@@ -215,9 +218,6 @@ extern "C"
   //
   // [logging] is 1, then generated WAT instructions will be printed to stdout.
   void cyth_wasm_generate(int logging);
-
-#endif
 #ifdef __cplusplus
 }
-#endif
 #endif

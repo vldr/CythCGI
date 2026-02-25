@@ -9,6 +9,12 @@
 #include "parser.h"
 #include "statement.h"
 
+typedef struct _TOKEN_LINK
+{
+  Token token;
+  struct _TOKEN_LINK* previous;
+} TokenLink;
+
 static struct
 {
   ArrayStmt statements;
@@ -20,7 +26,7 @@ static struct
   FuncStmt* function;
   ClassStmt* class;
   IfStmt* cond;
-  Token* template;
+  TokenLink* template;
   WhileStmt* loop;
   AssignExpr* assignment;
 
@@ -53,9 +59,17 @@ static DataType data_type_token_to_data_type(DataTypeToken type);
 static void error(Token token, const char* message)
 {
   if (checker.template)
-    message =
-      memory_sprintf("%s (occurred when creating %s at %d:%d)", message, checker.template->lexeme,
-                     checker.template->start_line, checker.template->start_column);
+  {
+    TokenLink* template = checker.template;
+    while (template)
+    {
+      message =
+        memory_sprintf("%s\n* occurred when creating %s at %d:%d", message, template->token.lexeme,
+                       template->token.start_line, template->token.start_column);
+
+      template = template->previous;
+    }
+  }
 
   if (!checker.error)
     if (checker.error_callback)
@@ -66,11 +80,11 @@ static void error(Token token, const char* message)
   checker.errors++;
 }
 
-static void link(Token reference, Token definition)
+static void link(Token reference, Token definition, int length)
 {
   if (checker.link_callback)
     checker.link_callback(reference.start_line, reference.start_column, definition.start_line,
-                          definition.start_column, reference.length);
+                          definition.start_column, length);
 }
 
 static void error_type_mismatch(Token token, DataType expected, DataType got)
@@ -769,7 +783,7 @@ static DataType token_to_data_type(Token token)
       DataType object = DATA_TYPE(TYPE_OBJECT);
       object.class = variable->data_type.class;
 
-      link(token, object.class->name);
+      link(token, object.class->name_raw, object.class->name_raw.length);
       return object;
     }
     else if (variable->data_type.type == TYPE_ALIAS)
@@ -794,6 +808,12 @@ static DataType class_template_to_data_type(DataType template, DataTypeToken tem
 
   if (variable && variable->data_type.type == TYPE_PROTOTYPE)
   {
+    if (checker.link_callback)
+    {
+      for (unsigned int i = 0; i < template.class_template->types.size; i++)
+        data_type_token_to_data_type(array_at(&template_type.types, i));
+    }
+
     return variable->data_type;
   }
 
@@ -830,12 +850,8 @@ static DataType class_template_to_data_type(DataType template, DataTypeToken tem
   checker.cond = NULL;
   checker.environment = checker.global_environment;
 
-  Token* previous_template = checker.template;
-  if (!previous_template)
-  {
-    checker.template = ALLOC(Token);
-    *checker.template = class_statement->name;
-  }
+  TokenLink next_template = { .token = class_statement->name, .previous = checker.template };
+  checker.template = &next_template;
 
   init_class_declaration(class_statement);
 
@@ -870,9 +886,7 @@ static DataType class_template_to_data_type(DataType template, DataTypeToken tem
   checker.loop = previous_loop;
   checker.cond = previous_cond;
   checker.environment = previous_environment;
-
-  if (!previous_template)
-    checker.template = NULL;
+  checker.template = checker.template->previous;
 
   array_add(&template.class_template->classes, class_statement);
 
@@ -891,6 +905,12 @@ static DataType function_template_to_data_type(DataType template, DataTypeToken 
   if (variable && (variable->data_type.type == TYPE_FUNCTION ||
                    variable->data_type.type == TYPE_FUNCTION_MEMBER))
   {
+    if (checker.link_callback)
+    {
+      for (unsigned int i = 0; i < template.function_template.function->types.size; i++)
+        data_type_token_to_data_type(array_at(&function_type.types, i));
+    }
+
     return variable->data_type;
   }
 
@@ -934,12 +954,8 @@ static DataType function_template_to_data_type(DataType template, DataTypeToken 
   checker.cond = template.function_template.function->cond;
   checker.environment = template.function_template.function->environment;
 
-  Token* previous_template = checker.template;
-  if (!previous_template)
-  {
-    checker.template = ALLOC(Token);
-    *checker.template = function_statement->name;
-  }
+  TokenLink next_template = { .token = function_statement->name, .previous = checker.template };
+  checker.template = &next_template;
 
   for (unsigned int i = 0; i < template.function_template.function->types.size; i++)
   {
@@ -970,9 +986,7 @@ static DataType function_template_to_data_type(DataType template, DataTypeToken 
   checker.loop = previous_loop;
   checker.cond = previous_cond;
   checker.environment = previous_environment;
-
-  if (!previous_template)
-    checker.template = NULL;
+  checker.template = checker.template->previous;
 
   array_add(&template.function_template.function->functions, function_statement);
 
@@ -1591,7 +1605,7 @@ static void init_function_declaration(FuncStmt* statement)
     }
 
     VarStmt* parameter = ALLOC(VarStmt);
-    parameter->name = checker.class->name;
+    parameter->name = checker.class->name_raw;
     parameter->name.lexeme = "this";
     parameter->name.length = sizeof("this") - 1;
     parameter->type = (DataTypeToken){
@@ -2399,7 +2413,7 @@ static DataType check_binary_expression(BinaryExpr* expression)
     expression->left_data_type = left;
     expression->right_data_type = right;
 
-    link(expression->op, expression->function->name);
+    link(expression->op, expression->function->name, expression->op.length);
     return expression->return_data_type;
   }
 
@@ -2554,8 +2568,11 @@ static DataType check_variable_expression(VarExpr* expression)
 
   expand_template_types(expression->template_types, &expression->data_type, expression->name);
 
-  if (expression->data_type.type != TYPE_PROTOTYPE)
-    link(expression->name, variable->name);
+  if (expression->data_type.type != TYPE_FUNCTION &&
+      expression->data_type.type != TYPE_FUNCTION_MEMBER &&
+      expression->data_type.type != TYPE_FUNCTION_GROUP &&
+      expression->data_type.type != TYPE_PROTOTYPE)
+    link(expression->name, variable->name, expression->name.length);
 
   return expression->data_type;
 }
@@ -2722,6 +2739,8 @@ static DataType check_call_expression(CallExpr* expression)
       }
     }
 
+    link(expression->callee_token, function->name_raw, function->name_raw.length);
+
     expression->function = function;
     expression->return_data_type = function->data_type;
     expression->callee_data_type = callee_data_type;
@@ -2758,6 +2777,8 @@ static DataType check_call_expression(CallExpr* expression)
                             argument_data_type);
       }
     }
+
+    link(expression->callee_token, function->name_raw, function->name_raw.length);
 
     expression->function = function;
     expression->return_data_type = function->data_type;
@@ -2900,12 +2921,10 @@ static DataType check_call_expression(CallExpr* expression)
       expression->function = class->default_constructor;
     }
 
+    link(expression->callee_token, expression->function->name, class->name_raw.length);
+
     expression->callee_data_type = callee_data_type;
     expression->return_data_type = token_to_data_type(class->name);
-
-    Token link_token = expression->callee_token;
-    link_token.length = class->name.length;
-    link(link_token, expression->function->name);
 
     return expression->return_data_type;
   }
@@ -3009,7 +3028,11 @@ static DataType check_access_expression(AccessExpr* expression)
       expression->data_type = expression_data_type;
     }
 
-    link(expression->name, variable->name);
+    if (expression->data_type.type != TYPE_FUNCTION &&
+        expression->data_type.type != TYPE_FUNCTION_MEMBER &&
+        expression->data_type.type != TYPE_FUNCTION_GROUP)
+      link(expression->name, variable->name, expression->name.length);
+
     return expression->data_type;
   }
   else if (data_type.type == TYPE_ARRAY)
@@ -3852,7 +3875,7 @@ static void check_variable_declaration(VarStmt* statement)
 
 static void check_get_function_declaration(FuncStmt* function)
 {
-  if (strcmp(function->name_raw, "__get__") == 0)
+  if (strcmp(function->name_raw.lexeme, "__get__") == 0)
   {
     int got = array_size(&function->parameters);
     int expected = 2;
@@ -3869,7 +3892,7 @@ static void check_get_function_declaration(FuncStmt* function)
 
 static void check_set_function_declaration(FuncStmt* function)
 {
-  if (strcmp(function->name_raw, "__set__") == 0)
+  if (strcmp(function->name_raw.lexeme, "__set__") == 0)
   {
     int got = array_size(&function->parameters);
     int expected = 3;
@@ -3886,7 +3909,7 @@ static void check_set_function_declaration(FuncStmt* function)
 
 static void check_str_function_declaration(FuncStmt* function)
 {
-  if (strcmp(function->name_raw, "__str__") == 0)
+  if (strcmp(function->name_raw.lexeme, "__str__") == 0)
   {
     int got = array_size(&function->parameters);
     int expected = 1;
@@ -3911,7 +3934,7 @@ static void check_str_function_declaration(FuncStmt* function)
 
 static void check_binary_overload_function_declaration(FuncStmt* function, const char* name)
 {
-  if (strcmp(function->name_raw, name) == 0)
+  if (strcmp(function->name_raw.lexeme, name) == 0)
   {
     int got = array_size(&function->parameters);
     int expected = 2;
@@ -4051,7 +4074,12 @@ static void check_class_template_declaration(ClassTemplateStmt* statement)
   ClassStmt* class_statement;
   array_foreach(&statement->classes, class_statement)
   {
+    TokenLink next_template = { .token = class_statement->name, .previous = checker.template };
+    checker.template = &next_template;
+
     check_class_declaration(class_statement);
+
+    checker.template = checker.template->previous;
   }
 }
 
@@ -4162,147 +4190,6 @@ static bool analyze_statements(ArrayStmt statements)
   return false;
 }
 
-void checker_init_globals(void)
-{
-  {
-    VarStmt* variable = ALLOC(VarStmt);
-    variable->name = TOKEN_EMPTY();
-    variable->type = DATA_TYPE_TOKEN_EMPTY();
-    variable->function = NULL;
-    variable->initializer = NULL;
-    variable->scope = SCOPE_GLOBAL;
-    variable->index = -1;
-    variable->data_type = DATA_TYPE(TYPE_FUNCTION_INTERNAL);
-    variable->data_type.function_internal.name = "alloc";
-    variable->data_type.function_internal.this = NULL;
-    variable->data_type.function_internal.return_type = ALLOC(DataType);
-    variable->data_type.function_internal.return_type->type = TYPE_INTEGER;
-
-    array_init(&variable->data_type.function_internal.parameter_types);
-    array_add(&variable->data_type.function_internal.parameter_types, DATA_TYPE(TYPE_INTEGER));
-
-    environment_set_variable(checker.environment, variable->data_type.function_internal.name,
-                             variable);
-  }
-
-  {
-    VarStmt* variable = ALLOC(VarStmt);
-    variable->name = TOKEN_EMPTY();
-    variable->type = DATA_TYPE_TOKEN_EMPTY();
-    variable->function = NULL;
-    variable->initializer = NULL;
-    variable->scope = SCOPE_GLOBAL;
-    variable->index = -1;
-    variable->data_type = DATA_TYPE(TYPE_FUNCTION_INTERNAL);
-    variable->data_type.function_internal.name = "memory";
-    variable->data_type.function_internal.this = NULL;
-    variable->data_type.function_internal.return_type = ALLOC(DataType);
-    variable->data_type.function_internal.return_type->type = TYPE_INTEGER;
-
-    array_init(&variable->data_type.function_internal.parameter_types);
-
-    environment_set_variable(checker.environment, variable->data_type.function_internal.name,
-                             variable);
-  }
-
-  {
-    VarStmt* variable = ALLOC(VarStmt);
-    variable->name = TOKEN_EMPTY();
-    variable->type = DATA_TYPE_TOKEN_EMPTY();
-    variable->function = NULL;
-    variable->initializer = NULL;
-    variable->scope = SCOPE_GLOBAL;
-    variable->index = -1;
-    variable->data_type = DATA_TYPE(TYPE_FUNCTION_INTERNAL);
-    variable->data_type.function_internal.name = "allocReset";
-    variable->data_type.function_internal.this = NULL;
-    variable->data_type.function_internal.return_type = ALLOC(DataType);
-    variable->data_type.function_internal.return_type->type = TYPE_VOID;
-
-    array_init(&variable->data_type.function_internal.parameter_types);
-
-    environment_set_variable(checker.environment, variable->data_type.function_internal.name,
-                             variable);
-  }
-
-  const char* writers[] = {
-    "writeInt",
-    "writeFloat",
-    "writeChar",
-    "writeBool",
-  };
-  DataType writer_param_types[] = {
-    DATA_TYPE(TYPE_INTEGER),
-    DATA_TYPE(TYPE_FLOAT),
-    DATA_TYPE(TYPE_CHAR),
-    DATA_TYPE(TYPE_BOOL),
-  };
-
-  for (unsigned int i = 0; i < sizeof(writers) / sizeof_ptr(writers); i++)
-  {
-    const char* name = writers[i];
-    DataType param_type = writer_param_types[i];
-
-    VarStmt* variable = ALLOC(VarStmt);
-    variable->name = TOKEN_EMPTY();
-    variable->type = DATA_TYPE_TOKEN_EMPTY();
-    variable->function = NULL;
-    variable->initializer = NULL;
-    variable->scope = SCOPE_GLOBAL;
-    variable->index = -1;
-    variable->data_type = DATA_TYPE(TYPE_FUNCTION_INTERNAL);
-    variable->data_type.function_internal.name = name;
-    variable->data_type.function_internal.this = NULL;
-    variable->data_type.function_internal.return_type = ALLOC(DataType);
-    variable->data_type.function_internal.return_type->type = TYPE_VOID;
-
-    array_init(&variable->data_type.function_internal.parameter_types);
-    array_add(&variable->data_type.function_internal.parameter_types, DATA_TYPE(TYPE_INTEGER));
-    array_add(&variable->data_type.function_internal.parameter_types, param_type);
-
-    environment_set_variable(checker.environment, variable->data_type.function_internal.name,
-                             variable);
-  }
-
-  const char* readers[] = {
-    "readInt",
-    "readFloat",
-    "readChar",
-    "readBool",
-  };
-  DataType reader_return_types[] = {
-    DATA_TYPE(TYPE_INTEGER),
-    DATA_TYPE(TYPE_FLOAT),
-    DATA_TYPE(TYPE_CHAR),
-    DATA_TYPE(TYPE_BOOL),
-  };
-
-  for (unsigned int i = 0; i < sizeof(readers) / sizeof_ptr(readers); i++)
-  {
-    const char* name = readers[i];
-    DataType return_type = reader_return_types[i];
-
-    VarStmt* variable = ALLOC(VarStmt);
-    variable->name = TOKEN_EMPTY();
-    variable->type = DATA_TYPE_TOKEN_EMPTY();
-    variable->function = NULL;
-    variable->initializer = NULL;
-    variable->scope = SCOPE_GLOBAL;
-    variable->index = -1;
-    variable->data_type = DATA_TYPE(TYPE_FUNCTION_INTERNAL);
-    variable->data_type.function_internal.name = name;
-    variable->data_type.function_internal.this = NULL;
-    variable->data_type.function_internal.return_type = ALLOC(DataType);
-    *variable->data_type.function_internal.return_type = return_type;
-
-    array_init(&variable->data_type.function_internal.parameter_types);
-    array_add(&variable->data_type.function_internal.parameter_types, DATA_TYPE(TYPE_INTEGER));
-
-    environment_set_variable(checker.environment, variable->data_type.function_internal.name,
-                             variable);
-  }
-}
-
 void checker_init(ArrayStmt statements,
                   void (*error_callback)(int start_line, int start_column, int end_line,
                                          int end_column, const char* message),
@@ -4326,8 +4213,6 @@ void checker_init(ArrayStmt statements,
   checker.global_environment = checker.environment;
 
   array_init(&checker.global_locals);
-
-  checker_init_globals();
 }
 
 int checker_errors(void)

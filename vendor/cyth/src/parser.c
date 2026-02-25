@@ -7,13 +7,6 @@
 #include <math.h>
 #include <stdio.h>
 
-static Expr* prefix_unary(void);
-static Expr* expression(void);
-static void statement(ArrayStmt* stmts);
-static void statements(ArrayStmt* stmts);
-
-static DataTypeToken data_type_array_function(bool* skip_greater_greater);
-
 static struct
 {
   int current;
@@ -25,6 +18,12 @@ static struct
   void (*error_callback)(int start_line, int start_column, int end_line, int end_column,
                          const char* message);
 } parser;
+
+static void statements(ArrayStmt* stmts);
+static void statement(ArrayStmt* stmts);
+static Expr* prefix_unary(void);
+static Expr* expression(void);
+static DataTypeToken data_type_array_function(bool* skip_greater_greater);
 
 static void error(Token token, const char* message)
 {
@@ -622,6 +621,7 @@ static Expr* call(void)
       access->access.expr = expr;
       access->access.expr_token = combine_tokens(start_token, end_token);
 
+      start_token = access->access.name;
       expr = access;
     }
     else if (match(TOKEN_LEFT_BRACKET))
@@ -955,7 +955,7 @@ static Stmt* function_declaration_statement(DataTypeToken type, Token name)
   stmt->type = STMT_FUNCTION_DECL;
   stmt->func.type = type;
   stmt->func.name = name;
-  stmt->func.name_raw = name.lexeme;
+  stmt->func.name_raw = name;
   stmt->func.import = NULL;
   stmt->func.item = NULL;
   stmt->func.proto = NULL;
@@ -1151,10 +1151,13 @@ static Stmt* class_declaration_statement(Token keyword, Token name)
   stmt->type = STMT_CLASS_DECL;
   stmt->class.keyword = keyword;
   stmt->class.name = name;
+  stmt->class.name_raw = name;
   stmt->class.ref = 0;
   stmt->class.size = 0;
   stmt->class.alignment = 1;
   stmt->class.default_constructor = ALLOC(FuncStmt);
+  stmt->class.default_constructor->name = name;
+  stmt->class.default_constructor->name_raw = name;
 
   array_init(&stmt->class.variables);
   array_init(&stmt->class.functions);

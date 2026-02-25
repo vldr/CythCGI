@@ -26,61 +26,33 @@
       for int y = 0; y < width; y += 1
 
         for int x = 0; x < height; x += 1
-
           float a = map((float)x, 0.0, (float)width, minX, maxX)
-
           float b = map((float)y, 0.0, (float)height, minY, maxY)
 
-    
-
           float ca = a
-
           float cb = b
 
-    
-
           float n = 0.0
-
           float maxIterations = 100.0
 
-    
-
           while n < maxIterations
-
             float aa = a * a - b * b
-
             float bb = 2 * a * b
-
             a = aa + ca
-
             b = bb + cb
 
-    
-
             if a * a + b * b > 64
-
               break
-
-    
 
             n += 1.0
 
-    
-
           float bright = map(n, 0.0, maxIterations, 0.0, 1.0)
-
           bright = map(bright.sqrt() * 2.0, 0.0, 1.0, 0.0, 255.0)
 
-    
-
           if n == maxIterations
-
             bright = 0.0
 
-          
-
           string f = (string)(int)bright
-
           buffer.push(f[0])
           buffer.push(' ')
           buffer.push(',')
