@@ -1,6 +1,11 @@
 <?
 Map<string, string> queries = parseQuery("a=b&b=c&something_else=Computer%25252525252BGraphics%2525252525252C%25252525252BRaytracing&notright#&blank=&ignoreme!&=apple")
 
+println("" + getEnvirons())
+
+for string env in getEnvirons()
+  println("" + env + " " + getEnviron(env))
+
 println(queries.contains("a") + "")
 println(queries.contains("") + queries[""])
 println(urlDecode("# hi<b></b> %E2%80%94") + query())
