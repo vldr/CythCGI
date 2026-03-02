@@ -31,10 +31,10 @@ stmt = connection.prepare("SELECT * FROM users WHERE age = ?")
 stmt.bind(1, 42)
 
 while stmt.next()
-  print(stmt.read<string>("name") + "\n")
-  print(stmt.read<int>("age") + "\n")
+  print(stmt.readString("name") + "\n")
+  print(stmt.readInt("age") + "\n")
 
-  print((string)stmt.read<char[]>("data"))
+  print((string)stmt.readBytes("data"))
   println("")
   println("")
 

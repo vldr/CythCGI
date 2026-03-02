@@ -30,44 +30,47 @@ struct Script {
     modified: SystemTime,
     text: Rc<Vec<String>>,
     mapping: Rc<Vec<(i32, i32)>>,
-    jit: *const c_void,
+    vm: *const c_void,
 }
 
 #[repr(C)]
-pub struct CythString {
+pub struct CyString {
     pub size: i32,
     pub data: [u8; 0],
 }
 
 #[repr(C)]
-pub struct CythArray<T> {
+pub struct CyArray<T> {
     pub size: i32,
     pub capacity: i32,
     pub data: *mut T,
 }
 
 unsafe extern "C" {
-    fn cyth_init(
-        source: *const c_char,
-        error_callback: *const c_void,
-        panic_callback: *const c_void,
-    ) -> *const c_void;
+    fn cyth_init() -> *const c_void;
+    fn cyth_set_error_callback(vm: *const c_void, error_callback: *const c_void);
+    fn cyth_set_panic_callback(vm: *const c_void, panic_callback: *const c_void);
+    fn cyth_load_function(
+        vm: *const c_void,
+        signature: *const c_char,
+        func: *const c_void,
+    ) -> c_int;
+    fn cyth_load_string(vm: *const c_void, source: *const c_char) -> c_int;
+    fn cyth_compile(vm: *const c_void) -> c_int;
+    fn cyth_run(vm: *const c_void);
+    fn cyth_destroy(vm: *const c_void);
     fn cyth_alloc(atomic: c_int, size: usize) -> *const c_void;
-    fn cyth_generate(jit: *const c_void, logging: c_int);
-    fn cyth_run(jit: *const c_void);
-    fn cyth_destroy(jit: *const c_void);
-    fn cyth_set_function(jit: *const c_void, name: *const c_char, cb: *const c_void);
 }
 
-fn cyth_new_string(string: &str) -> *mut CythString {
+fn cyth_new_string(string: &str) -> *mut CyString {
     unsafe {
         let layout = Layout::from_size_align(
-            std::mem::size_of::<CythString>() + string.len(),
-            std::mem::align_of::<CythString>(),
+            std::mem::size_of::<CyString>() + string.len(),
+            std::mem::align_of::<CyString>(),
         )
         .unwrap();
 
-        let cyth_string = cyth_alloc(1, layout.size()) as *mut CythString;
+        let cyth_string = cyth_alloc(1, layout.size()) as *mut CyString;
         if cyth_string.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
@@ -83,7 +86,7 @@ fn cyth_new_string(string: &str) -> *mut CythString {
     }
 }
 
-fn cyth_new_array<T: Copy>(list: Vec<T>) -> *mut CythArray<T> {
+fn cyth_new_array<T: Copy>(list: Vec<T>) -> *mut CyArray<T> {
     unsafe {
         let data_size = list.len();
         let data_atomic = !std::any::type_name::<T>().starts_with("*") as i32;
@@ -97,8 +100,8 @@ fn cyth_new_array<T: Copy>(list: Vec<T>) -> *mut CythArray<T> {
             ptr::write(data_ptr.add(index), *item);
         }
 
-        let cyth_array_layout = Layout::new::<CythArray<*mut T>>();
-        let cyth_array = cyth_alloc(0, cyth_array_layout.size()) as *mut CythArray<T>;
+        let cyth_array_layout = Layout::new::<CyArray<*mut T>>();
+        let cyth_array = cyth_alloc(0, cyth_array_layout.size()) as *mut CyArray<T>;
         if cyth_array.is_null() {
             std::alloc::handle_alloc_error(cyth_array_layout);
         }
@@ -111,7 +114,7 @@ fn cyth_new_array<T: Copy>(list: Vec<T>) -> *mut CythArray<T> {
     }
 }
 
-fn cyth_string_to_str<'a>(cyth_string: *const CythString) -> &'a str {
+fn cyth_string_to_str<'a>(cyth_string: *const CyString) -> &'a str {
     unsafe {
         let slice =
             slice::from_raw_parts((*cyth_string).data.as_ptr(), (*cyth_string).size as usize);
@@ -119,7 +122,7 @@ fn cyth_string_to_str<'a>(cyth_string: *const CythString) -> &'a str {
     }
 }
 
-fn cyth_array_to_slice<'a>(cyth_array: *const CythArray<u8>) -> &'a [u8] {
+fn cyth_char_array_to_slice<'a>(cyth_array: *const CyArray<u8>) -> &'a [u8] {
     unsafe { slice::from_raw_parts((*cyth_array).data, (*cyth_array).size as usize) }
 }
 
@@ -179,40 +182,7 @@ struct Context {
     path: String,
 }
 
-const IMPORTS: &str = "import \"std\"
-    void print(string a)
-    void println(string a)
-    void printInternal(int index)
-
-    string urlEncode(string a)
-    string urlDecode(string a)
-    string markdown(string a)
-
-    string hash(string a)
-    bool verify(string a, string b)
-
-    string body()
-    string query()
-
-    void header(string a)
-    string cookie(string a)
-    string uuid()
-
-    string getEnviron(string a)
-    string[] getEnvirons()
-
-    string date(int a, string b)
-    int now()
-
-    int sqliteOpen(string a)
-    bool sqliteExecute(int a, string b)
-    int sqlitePrepare(int a, string b)
-    bool sqliteBind<T>(int a, int b, T c)
-    bool sqliteBindNull(int a, int b)
-    bool sqliteNext(int a)
-    bool sqliteReadNull(int a, string b)
-    T sqliteRead<T>(int a, string b)
-
+const IMPORTS: &str = "
 Map<string, string> parseQuery(string query)
     Map<string, string> result = Map<string, string>()
 
@@ -286,23 +256,32 @@ class Statement
     void __init__(int stmt)
         this.stmt = stmt
 
-    T read<T>(string column)
-        return sqliteRead<T>(stmt, column)
+    int readInt(string column)
+        return sqliteReadInt(stmt, column)
+
+    float readFloat(string column)
+        return sqliteReadFloat(stmt, column)
+
+    string readString(string column)
+        return sqliteReadString(stmt, column)
+
+    char[] readBytes(string column)
+        return sqliteReadBytes(stmt, column)
 
     bool readNull(string column)
         return sqliteReadNull(stmt, column)
 
     bool bind(int index, int value)
-        return sqliteBind<int>(stmt, index, value)
+        return sqliteBind(stmt, index, value)
 
     bool bind(int index, float value)
-        return sqliteBind<float>(stmt, index, value)
+        return sqliteBind(stmt, index, value)
 
     bool bind(int index, string value)
-        return sqliteBind<string>(stmt, index, value)
+        return sqliteBind(stmt, index, value)
     
     bool bind(int index, char[] value)
-        return sqliteBind<char[]>(stmt, index, value)
+        return sqliteBind(stmt, index, value)
     
     bool bind(int index)
         return sqliteBindNull(stmt, index)
@@ -468,17 +447,12 @@ fn read_script(path: &String) -> (String, Vec<String>, Rc<Vec<(i32, i32)>>) {
 
     let input = fs::read_to_string(path).unwrap();
     let mut output = String::new();
-    output += IMPORTS;
 
     let mut code = false;
     let mut text = Vec::<String>::new();
     let mut mapping = Vec::<(i32, i32)>::new();
     let mut line = 1;
     let mut column = 1;
-
-    for _ in IMPORTS.lines() {
-        mapping.push((0, 0));
-    }
 
     let mut start = 0;
     let mut start_line = 1;
@@ -552,7 +526,7 @@ fn run_script(req: &mut Request, context: &mut Context, script: &Script) {
     context.input.clear();
     req.stdin().read_to_string(&mut context.input).unwrap();
 
-    unsafe { cyth_run(script.jit) };
+    unsafe { cyth_run(script.vm) };
 
     if !context.headers.contains("Content-Type:") {
         context
@@ -574,26 +548,26 @@ fn run_script(req: &mut Request, context: &mut Context, script: &Script) {
     context.connections.clear();
 }
 
-fn link_script(jit: *const c_void) {
+fn compile_script(vm: *const c_void) -> c_int {
     unsafe {
-        unsafe extern "C" fn print(input: *const CythString) {
+        unsafe extern "C" fn print(input: *const CyString) {
             let context = unsafe { &mut *CONTEXT };
             context.output.push_str(cyth_string_to_str(input));
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.print.void(string)").unwrap().as_ptr(),
+        cyth_load_function(
+            vm,
+            CString::new("void print(string n)").unwrap().as_ptr(),
             print as *const c_void,
         );
 
-        unsafe extern "C" fn println(input: *const CythString) {
+        unsafe extern "C" fn println(input: *const CyString) {
             let context = unsafe { &mut *CONTEXT };
             context.output.push_str(cyth_string_to_str(input));
             context.output.push('\n');
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.println.void(string)").unwrap().as_ptr(),
+        cyth_load_function(
+            vm,
+            CString::new("void println(string n)").unwrap().as_ptr(),
             println as *const c_void,
         );
 
@@ -604,29 +578,25 @@ fn link_script(jit: *const c_void) {
                 context.output.write_str(&text).unwrap();
             }
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.printInternal.void(int)")
-                .unwrap()
-                .as_ptr(),
+        cyth_load_function(
+            vm,
+            CString::new("void printInternal(int n)").unwrap().as_ptr(),
             print_internal as *const c_void,
         );
 
-        unsafe extern "C" fn url_encode(input: *const CythString) -> *const CythString {
+        unsafe extern "C" fn url_encode(input: *const CyString) -> *const CyString {
             let input = cyth_string_to_str(input);
             let output = percent_encoding::utf8_percent_encode(input, NON_ALPHANUMERIC).to_string();
 
             cyth_new_string(&output)
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.urlEncode.string(string)")
-                .unwrap()
-                .as_ptr(),
+        cyth_load_function(
+            vm,
+            CString::new("string urlEncode(string n)").unwrap().as_ptr(),
             url_encode as *const c_void,
         );
 
-        unsafe extern "C" fn url_decode(input: *const CythString) -> *const CythString {
+        unsafe extern "C" fn url_decode(input: *const CyString) -> *const CyString {
             let input = cyth_string_to_str(input);
             let output = percent_encoding::percent_decode_str(input)
                 .decode_utf8()
@@ -636,15 +606,13 @@ fn link_script(jit: *const c_void) {
 
             cyth_new_string(&output)
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.urlDecode.string(string)")
-                .unwrap()
-                .as_ptr(),
+        cyth_load_function(
+            vm,
+            CString::new("string urlDecode(string n)").unwrap().as_ptr(),
             url_decode as *const c_void,
         );
 
-        unsafe extern "C" fn markdown(input: *const CythString) -> *const CythString {
+        unsafe extern "C" fn markdown(input: *const CyString) -> *const CyString {
             let input = cyth_string_to_str(input);
             let output = markdown::to_html_with_options(
                 input,
@@ -660,78 +628,76 @@ fn link_script(jit: *const c_void) {
 
             cyth_new_string(&output)
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.markdown.string(string)")
-                .unwrap()
-                .as_ptr(),
+        cyth_load_function(
+            vm,
+            CString::new("string markdown(string n)").unwrap().as_ptr(),
             markdown as *const c_void,
         );
 
-        unsafe extern "C" fn hash(input: *const CythString) -> *const CythString {
+        unsafe extern "C" fn hash(input: *const CyString) -> *const CyString {
             let input = cyth_string_to_str(input);
             let output = bcrypt::hash(input, DEFAULT_COST).unwrap();
             cyth_new_string(&output)
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.hash.string(string)").unwrap().as_ptr(),
+        cyth_load_function(
+            vm,
+            CString::new("string hash(string n)").unwrap().as_ptr(),
             hash as *const c_void,
         );
 
-        unsafe extern "C" fn verify(password: *const CythString, hash: *const CythString) -> c_int {
+        unsafe extern "C" fn verify(password: *const CyString, hash: *const CyString) -> c_int {
             let password = cyth_string_to_str(password);
             let hash = cyth_string_to_str(hash);
             let output = bcrypt::verify(password, hash).unwrap();
 
             output.into()
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.verify.bool(string, string)")
+        cyth_load_function(
+            vm,
+            CString::new("bool verify(string n, string m)")
                 .unwrap()
                 .as_ptr(),
             verify as *const c_void,
         );
 
-        unsafe extern "C" fn body() -> *const CythString {
+        unsafe extern "C" fn body() -> *const CyString {
             let context = unsafe { &mut *CONTEXT };
 
             cyth_new_string(&context.input)
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.body.string()").unwrap().as_ptr(),
+        cyth_load_function(
+            vm,
+            CString::new("string body()").unwrap().as_ptr(),
             body as *const c_void,
         );
 
-        unsafe extern "C" fn query() -> *const CythString {
+        unsafe extern "C" fn query() -> *const CyString {
             let context = unsafe { &mut *CONTEXT };
             let default = String::new();
             let query = context.environs.get("QUERY_STRING").unwrap_or(&default);
 
             cyth_new_string(query)
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.query.string()").unwrap().as_ptr(),
+        cyth_load_function(
+            vm,
+            CString::new("string query()").unwrap().as_ptr(),
             query as *const c_void,
         );
 
-        unsafe extern "C" fn header(input: *const CythString) {
+        unsafe extern "C" fn header(input: *const CyString) {
             let context = unsafe { &mut *CONTEXT };
             let input = cyth_string_to_str(input);
 
             context.headers.push_str(input);
             context.headers.push('\n');
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.header.void(string)").unwrap().as_ptr(),
+        cyth_load_function(
+            vm,
+            CString::new("void header(string n)").unwrap().as_ptr(),
             header as *const c_void,
         );
 
-        unsafe extern "C" fn cookie(name: *const CythString) -> *const CythString {
+        unsafe extern "C" fn cookie(name: *const CyString) -> *const CyString {
             let context = unsafe { &mut *CONTEXT };
             let name = cyth_string_to_str(name);
             let empty_string = "".to_owned();
@@ -755,23 +721,23 @@ fn link_script(jit: *const c_void) {
                 cyth_new_string(&empty_string)
             }
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.cookie.string(string)").unwrap().as_ptr(),
+        cyth_load_function(
+            vm,
+            CString::new("string cookie(string n)").unwrap().as_ptr(),
             cookie as *const c_void,
         );
 
-        unsafe extern "C" fn uuid() -> *const CythString {
+        unsafe extern "C" fn uuid() -> *const CyString {
             let uuid = Uuid::new_v4();
             cyth_new_string(&uuid.as_hyphenated().to_string())
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.uuid.string()").unwrap().as_ptr(),
+        cyth_load_function(
+            vm,
+            CString::new("string uuid()").unwrap().as_ptr(),
             uuid as *const c_void,
         );
 
-        unsafe extern "C" fn get_environ(key: *const CythString) -> *const CythString {
+        unsafe extern "C" fn get_environ(key: *const CyString) -> *const CyString {
             let context = unsafe { &mut *CONTEXT };
             let key = cyth_string_to_str(key);
 
@@ -780,15 +746,15 @@ fn link_script(jit: *const c_void) {
 
             cyth_new_string(environ)
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.getEnviron.string(string)")
+        cyth_load_function(
+            vm,
+            CString::new("string getEnviron(string n)")
                 .unwrap()
                 .as_ptr(),
             get_environ as *const c_void,
         );
 
-        unsafe extern "C" fn get_environs() -> *mut CythArray<*mut CythString> {
+        unsafe extern "C" fn get_environs() -> *mut CyArray<*mut CyString> {
             let context = unsafe { &mut *CONTEXT };
 
             cyth_new_array(
@@ -799,22 +765,22 @@ fn link_script(jit: *const c_void) {
                     .collect(),
             )
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.getEnvirons.string[]()").unwrap().as_ptr(),
+        cyth_load_function(
+            vm,
+            CString::new("string[] getEnvirons()").unwrap().as_ptr(),
             get_environs as *const c_void,
         );
 
-        unsafe extern "C" fn date(epoch: c_int, format: *const CythString) -> *const CythString {
+        unsafe extern "C" fn date(epoch: c_int, format: *const CyString) -> *const CyString {
             let format = cyth_string_to_str(format);
             let datetime = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs(epoch as u64));
             let result = datetime.format(format).to_string();
 
             cyth_new_string(&result)
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.date.string(int, string)")
+        cyth_load_function(
+            vm,
+            CString::new("string date(int n, string m)")
                 .unwrap()
                 .as_ptr(),
             date as *const c_void,
@@ -826,13 +792,13 @@ fn link_script(jit: *const c_void) {
                 .unwrap()
                 .as_secs() as i32
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.now.int()").unwrap().as_ptr(),
+        cyth_load_function(
+            vm,
+            CString::new("int now()").unwrap().as_ptr(),
             now as *const c_void,
         );
 
-        unsafe extern "C" fn sqlite_open(path: *const CythString) -> c_int {
+        unsafe extern "C" fn sqlite_open(path: *const CyString) -> c_int {
             let context = unsafe { &mut *CONTEXT };
             let path = cyth_string_to_str(path);
             let connection = Connection::open_thread_safe(path);
@@ -849,13 +815,13 @@ fn link_script(jit: *const c_void) {
                 }
             }
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.sqliteOpen.int(string)").unwrap().as_ptr(),
+        cyth_load_function(
+            vm,
+            CString::new("int sqliteOpen(string n)").unwrap().as_ptr(),
             sqlite_open as *const c_void,
         );
 
-        unsafe extern "C" fn sqlite_execute(id: c_int, query: *const CythString) -> c_int {
+        unsafe extern "C" fn sqlite_execute(id: c_int, query: *const CyString) -> c_int {
             let context = unsafe { &mut *CONTEXT };
             let query = cyth_string_to_str(query);
             let Some(connection) = context.connections.get_mut((id - 1) as usize) else {
@@ -864,15 +830,15 @@ fn link_script(jit: *const c_void) {
 
             connection.execute(query).is_ok() as c_int
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.sqliteExecute.bool(int, string)")
+        cyth_load_function(
+            vm,
+            CString::new("bool sqliteExecute(int n, string m)")
                 .unwrap()
                 .as_ptr(),
             sqlite_execute as *const c_void,
         );
 
-        unsafe extern "C" fn sqlite_prepare(id: c_int, query: *const CythString) -> c_int {
+        unsafe extern "C" fn sqlite_prepare(id: c_int, query: *const CyString) -> c_int {
             let context = unsafe { &mut *CONTEXT };
 
             let query = cyth_string_to_str(query);
@@ -897,9 +863,9 @@ fn link_script(jit: *const c_void) {
                 }
             }
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.sqlitePrepare.int(int, string)")
+        cyth_load_function(
+            vm,
+            CString::new("int sqlitePrepare(int n, string m)")
                 .unwrap()
                 .as_ptr(),
             sqlite_prepare as *const c_void,
@@ -913,9 +879,9 @@ fn link_script(jit: *const c_void) {
 
             statement.bind((index as usize, value as i64)).is_ok() as c_int
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.sqliteBind<int>.bool(int, int, int)")
+        cyth_load_function(
+            vm,
+            CString::new("bool sqliteBind(int n, int m, int q)")
                 .unwrap()
                 .as_ptr(),
             sqlite_bind_int as *const c_void,
@@ -929,9 +895,9 @@ fn link_script(jit: *const c_void) {
 
             statement.bind((index as usize, value as f64)).is_ok() as c_int
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.sqliteBind<float>.bool(int, int, float)")
+        cyth_load_function(
+            vm,
+            CString::new("bool sqliteBind(int n, int m, float q)")
                 .unwrap()
                 .as_ptr(),
             sqlite_bind_float as *const c_void,
@@ -940,19 +906,19 @@ fn link_script(jit: *const c_void) {
         unsafe extern "C" fn sqlite_bind_char(
             id: c_int,
             index: c_int,
-            value: *const CythArray<u8>,
+            value: *const CyArray<u8>,
         ) -> c_int {
             let context = unsafe { &mut *CONTEXT };
             let Some(statement) = context.statements.get_mut((id - 1) as usize) else {
                 return 0;
             };
 
-            let slice = cyth_array_to_slice(value);
+            let slice = cyth_char_array_to_slice(value);
             statement.bind((index as usize, slice)).is_ok() as c_int
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.sqliteBind<char[]>.bool(int, int, char[])")
+        cyth_load_function(
+            vm,
+            CString::new("bool sqliteBind(int n, int m, char[] q)")
                 .unwrap()
                 .as_ptr(),
             sqlite_bind_char as *const c_void,
@@ -961,7 +927,7 @@ fn link_script(jit: *const c_void) {
         unsafe extern "C" fn sqlite_bind_string(
             id: c_int,
             index: c_int,
-            value: *const CythString,
+            value: *const CyString,
         ) -> c_int {
             let context = unsafe { &mut *CONTEXT };
             let value = cyth_string_to_str(value);
@@ -971,9 +937,9 @@ fn link_script(jit: *const c_void) {
 
             statement.bind((index as usize, value)).is_ok() as c_int
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.sqliteBind<string>.bool(int, int, string)")
+        cyth_load_function(
+            vm,
+            CString::new("bool sqliteBind(int n, int m, string q)")
                 .unwrap()
                 .as_ptr(),
             sqlite_bind_string as *const c_void,
@@ -989,9 +955,9 @@ fn link_script(jit: *const c_void) {
                 .bind((index as usize, sqlite::Value::Null))
                 .is_ok() as c_int
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.sqliteBindNull.bool(int, int)")
+        cyth_load_function(
+            vm,
+            CString::new("bool sqliteBindNull(int n, int m)")
                 .unwrap()
                 .as_ptr(),
             sqlite_bind_null as *const c_void,
@@ -1016,13 +982,13 @@ fn link_script(jit: *const c_void) {
                 Err(_) => 0,
             }
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.sqliteNext.bool(int)").unwrap().as_ptr(),
+        cyth_load_function(
+            vm,
+            CString::new("bool sqliteNext(int n)").unwrap().as_ptr(),
             sqlite_next as *const c_void,
         );
 
-        unsafe extern "C" fn sqlite_read_int(id: c_int, value: *const CythString) -> c_int {
+        unsafe extern "C" fn sqlite_read_int(id: c_int, value: *const CyString) -> c_int {
             let context = unsafe { &mut *CONTEXT };
             let value = cyth_string_to_str(value);
             let Some(statement) = context.statements.get_mut((id - 1) as usize) else {
@@ -1031,15 +997,15 @@ fn link_script(jit: *const c_void) {
 
             statement.read::<i64, &str>(value).unwrap_or_default() as c_int
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.sqliteRead<int>.int(int, string)")
+        cyth_load_function(
+            vm,
+            CString::new("int sqliteReadInt(int n, string m)")
                 .unwrap()
                 .as_ptr(),
             sqlite_read_int as *const c_void,
         );
 
-        unsafe extern "C" fn sqlite_read_float(id: c_int, value: *const CythString) -> c_float {
+        unsafe extern "C" fn sqlite_read_float(id: c_int, value: *const CyString) -> c_float {
             let context = unsafe { &mut *CONTEXT };
             let value = cyth_string_to_str(value);
             let Some(statement) = context.statements.get_mut((id - 1) as usize) else {
@@ -1048,9 +1014,9 @@ fn link_script(jit: *const c_void) {
 
             statement.read::<f64, &str>(value).unwrap_or_default() as c_float
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.sqliteRead<float>.float(int, string)")
+        cyth_load_function(
+            vm,
+            CString::new("float sqliteReadFloat(int n, string m)")
                 .unwrap()
                 .as_ptr(),
             sqlite_read_float as *const c_void,
@@ -1058,8 +1024,8 @@ fn link_script(jit: *const c_void) {
 
         unsafe extern "C" fn sqlite_read_char(
             id: c_int,
-            value: *const CythString,
-        ) -> *const CythArray<u8> {
+            value: *const CyString,
+        ) -> *const CyArray<u8> {
             let context = unsafe { &mut *CONTEXT };
             let value = cyth_string_to_str(value);
 
@@ -1069,9 +1035,9 @@ fn link_script(jit: *const c_void) {
 
             cyth_new_array(statement.read::<Vec<u8>, &str>(value).unwrap_or_default())
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.sqliteRead<char[]>.char[](int, string)")
+        cyth_load_function(
+            vm,
+            CString::new("char[] sqliteReadBytes(int n, string m)")
                 .unwrap()
                 .as_ptr(),
             sqlite_read_char as *const c_void,
@@ -1079,8 +1045,8 @@ fn link_script(jit: *const c_void) {
 
         unsafe extern "C" fn sqlite_read_string(
             id: c_int,
-            value: *const CythString,
-        ) -> *const CythString {
+            value: *const CyString,
+        ) -> *const CyString {
             let context = unsafe { &mut *CONTEXT };
             let value = cyth_string_to_str(value);
             let Some(statement) = context.statements.get_mut((id - 1) as usize) else {
@@ -1089,15 +1055,15 @@ fn link_script(jit: *const c_void) {
 
             cyth_new_string(&statement.read::<String, &str>(value).unwrap_or_default())
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.sqliteRead<string>.string(int, string)")
+        cyth_load_function(
+            vm,
+            CString::new("string sqliteReadString(int n, string m)")
                 .unwrap()
                 .as_ptr(),
             sqlite_read_string as *const c_void,
         );
 
-        unsafe extern "C" fn sqlite_read_null(id: c_int, value: *const CythString) -> c_int {
+        unsafe extern "C" fn sqlite_read_null(id: c_int, value: *const CyString) -> c_int {
             let context = unsafe { &mut *CONTEXT };
             let value = cyth_string_to_str(value);
             let Some(statement) = context.statements.get_mut((id - 1) as usize) else {
@@ -1108,15 +1074,15 @@ fn link_script(jit: *const c_void) {
 
             (result == Value::Null) as c_int
         }
-        cyth_set_function(
-            jit,
-            CString::new("std.sqliteReadNull.bool(int, string)")
+        cyth_load_function(
+            vm,
+            CString::new("bool sqliteReadNull(int n, string m)")
                 .unwrap()
                 .as_ptr(),
             sqlite_read_null as *const c_void,
         );
 
-        cyth_generate(jit, 0);
+        cyth_compile(vm)
     }
 }
 
@@ -1152,47 +1118,52 @@ fn request(mut req: Request, context: &mut Context, scripts: &mut HashMap<String
             .modified
             .ne(&metadata.modified().unwrap())
     {
-        let (source, text, mapping) = read_script(&path);
+        unsafe {
+            let (source, text, mapping) = read_script(&path);
 
-        context.path = path;
-        context.mapping = mapping.clone();
-        context.output.clear();
+            context.path = path;
+            context.mapping = mapping.clone();
+            context.output.clear();
+    
+            let vm: *const c_void = cyth_init();
+            let imports  = CString::new(IMPORTS).unwrap();
+            let source = CString::new(source).unwrap();
 
-        let source = CString::new(source).unwrap();
-        let jit = unsafe {
-            cyth_init(
-                source.as_ptr(),
-                error_callback as *const c_void,
-                panic_callback as *const c_void,
-            )
-        };
-        if jit.is_null() {
-            write!(
-                &mut req.stdout(),
-                "{}{}{}",
-                "Status: 500 Internal Server Error\n",
-                "Content-Type: text/plain\n\n",
-                context.output
-            )
-            .unwrap_or(());
-            return;
+            cyth_set_error_callback(vm, error_callback as *const c_void);
+            cyth_set_panic_callback(vm, panic_callback as *const c_void);
+            cyth_load_string(vm, imports.as_ptr());
+        
+            let load_result = cyth_load_string(vm, source.as_ptr());
+            let compilation_result = compile_script(vm);
+
+            if load_result == 0 || compilation_result == 0 {
+                cyth_destroy(vm);
+
+                write!(
+                    &mut req.stdout(),
+                    "{}{}{}",
+                    "Status: 500 Internal Server Error\n",
+                    "Content-Type: text/plain\n\n",
+                    context.output
+                )
+                .unwrap_or(());
+                return;
+            }
+
+            if let Some(script) = script {
+                cyth_destroy(script.vm);
+            }
+
+            let script = Script {
+                modified: metadata.modified().unwrap(),
+                text: text.into(),
+                mapping,
+                vm,
+            };
+
+            run_script(&mut req, context, &script);
+            scripts.insert(context.path.clone(), script);
         }
-
-        link_script(jit);
-
-        if let Some(script) = script {
-            unsafe { cyth_destroy(script.jit) };
-        }
-
-        let script = Script {
-            modified: metadata.modified().unwrap(),
-            text: text.into(),
-            mapping,
-            jit,
-        };
-
-        run_script(&mut req, context, &script);
-        scripts.insert(context.path.clone(), script);
     } else {
         unsafe {
             let context = &mut *CONTEXT;
