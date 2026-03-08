@@ -85,7 +85,126 @@ static void generate_statements(CyVM* vm, ArrayStmt* statements);
 static void init_statement(CyVM* vm, Stmt* statement);
 static void init_statements(CyVM* vm, ArrayStmt* statements);
 static void init_function_declaration(CyVM* vm, FuncStmt* statement);
-static void panic(CyVM* vm, const char* what, uintptr_t pc, uintptr_t fp);
+
+uintptr_t panic_fp;
+CyVM* panic_vm;
+
+static void panic(CyVM* vm, const char* what, uintptr_t pc, uintptr_t fp)
+{
+  if (vm->panic_callback)
+    vm->panic_callback(what, 0, 0);
+
+  for (MIR_item_t item = DLIST_TAIL(MIR_item_t, vm->module->items); item != NULL;
+       item = DLIST_PREV(MIR_item_t, item))
+  {
+    if (item->item_type != MIR_func_item)
+      continue;
+
+    uintptr_t offset = 0;
+
+    for (MIR_insn_t insn = DLIST_HEAD(MIR_insn_t, item->u.func->insns); insn != NULL;
+         insn = DLIST_NEXT(MIR_insn_t, insn))
+    {
+      uintptr_t ptr = (uintptr_t)item->u.func->machine_code + offset;
+      if (pc >= ptr && pc < ptr + insn->size)
+      {
+        if (insn->line && insn->column)
+          if (vm->panic_callback)
+            vm->panic_callback(item->u.func->name, insn->line, insn->column);
+      }
+
+      offset += insn->size;
+    }
+  }
+
+  if (!fp)
+  {
+#if defined(__clang__) || defined(__GNUC__)
+    fp = (uintptr_t)__builtin_frame_address(0);
+#elif defined(_MSC_VER)
+    fp = (uintptr_t)_AddressOfReturnAddress() - 8;
+#endif
+  }
+
+  uintptr_t panic_fp_min = (uintptr_t)alloca(sizeof(uintptr_t));
+
+  while (fp >= panic_fp_min && fp <= panic_fp)
+  {
+    uintptr_t pc = *(uintptr_t*)(fp + sizeof(uintptr_t));
+
+    for (MIR_item_t item = DLIST_TAIL(MIR_item_t, vm->module->items); item != NULL;
+         item = DLIST_PREV(MIR_item_t, item))
+    {
+      if (item->item_type != MIR_func_item)
+        continue;
+
+      uintptr_t offset = 0;
+
+      for (MIR_insn_t insn = DLIST_HEAD(MIR_insn_t, item->u.func->insns); insn != NULL;
+           insn = DLIST_NEXT(MIR_insn_t, insn))
+      {
+        offset += insn->size;
+
+        uintptr_t ptr = (uintptr_t)item->u.func->machine_code + offset;
+        if (pc >= ptr && pc < ptr + insn->size)
+        {
+          if (insn->line && insn->column)
+            if (vm->panic_callback)
+              vm->panic_callback(item->u.func->name, insn->line, insn->column);
+        }
+      }
+    }
+
+    fp = *(uintptr_t*)fp;
+  }
+
+  if (vm->jmp == NULL)
+  {
+    fprintf(stderr, "Panic was not caught, terminating program!\n");
+    exit(-1);
+  }
+
+  cyth_longjmp(*vm->jmp, 1);
+}
+
+static void panic_callback(const char* function, int line, int column)
+{
+  static const char* previous_function;
+  static int previous_line;
+  static int previous_column;
+  static int previous_count;
+
+  if (line && column)
+  {
+    if (function == previous_function && line == previous_line && column == previous_column)
+    {
+      if (previous_count == 0)
+        fprintf(stderr, "  at ...\n");
+
+      previous_count++;
+    }
+    else
+    {
+      fprintf(stderr, "  at %s:%d:%d\n", function, line, column);
+      previous_count = 0;
+    }
+  }
+  else
+  {
+    fprintf(stderr, "%s\n", function);
+  }
+
+  previous_function = function;
+  previous_line = line;
+  previous_column = column;
+}
+
+static void error_callback(int start_line, int start_column, int end_line, int end_column,
+                           const char* message)
+{
+  fprintf(stderr, "%d:%d-%d:%d: error: %s\n", start_line, start_column, end_line, end_column,
+          message);
+}
 
 static int string_equals(CyString* left, CyString* right)
 {
@@ -4498,15 +4617,6 @@ static void generate_class_template_declaration(CyVM* vm, ClassTemplateStmt* sta
   }
 }
 
-static void generate_import_declaration(CyVM* vm, ImportStmt* statement)
-{
-  Stmt* body_statement;
-  array_foreach(&statement->body, body_statement)
-  {
-    generate_statement(vm, body_statement);
-  }
-}
-
 static void generate_statement(CyVM* vm, Stmt* statement)
 {
   switch (statement->type)
@@ -4534,9 +4644,6 @@ static void generate_statement(CyVM* vm, Stmt* statement)
     return;
   case STMT_FUNCTION_DECL:
     generate_function_declaration(vm, &statement->func);
-    return;
-  case STMT_IMPORT_DECL:
-    generate_import_declaration(vm, &statement->import);
     return;
   case STMT_CLASS_DECL:
     generate_class_declaration(vm, &statement->class);
@@ -4702,15 +4809,6 @@ static void init_class_declaration(CyVM* vm, ClassStmt* statement)
   } while (index < initializer_functions.size);
 }
 
-static void init_import_declaration(CyVM* vm, ImportStmt* statement)
-{
-  Stmt* body_statement;
-  array_foreach(&statement->body, body_statement)
-  {
-    init_statement(vm, body_statement);
-  }
-}
-
 static void init_class_template_declaration(CyVM* vm, ClassTemplateStmt* statement)
 {
   ClassStmt* class_declaration;
@@ -4762,9 +4860,6 @@ static void init_statement(CyVM* vm, Stmt* statement)
   case STMT_FUNCTION_DECL:
     init_function_declaration(vm, &statement->func);
     return;
-  case STMT_IMPORT_DECL:
-    init_import_declaration(vm, &statement->import);
-    return;
   case STMT_CLASS_DECL:
     init_class_declaration(vm, &statement->class);
     return;
@@ -4797,9 +4892,10 @@ CyVM* cyth_init(void)
   vm->continue_label = NULL;
   vm->break_label = NULL;
   vm->jmp = NULL;
+  vm->start = NULL;
   vm->logging = 0;
-  vm->error_callback = NULL;
-  vm->panic_callback = NULL;
+  vm->error_callback = error_callback;
+  vm->panic_callback = panic_callback;
   array_init(&vm->statements);
 
   MIR_load_external(vm->ctx, "panic", (uintptr_t)panic);
@@ -4884,6 +4980,84 @@ CyVM* cyth_init(void)
   map_init_s64(&vm->typeids, 0, 0);
 
   return vm;
+}
+
+int cyth_compile(CyVM* vm)
+{
+  checker_init(vm->statements, vm->error_callback, NULL);
+  checker_validate();
+
+  bool result = !checker_errors();
+  if (result)
+  {
+    VarStmt* global_local;
+    ArrayVarStmt global_local_statements = checker_global_locals();
+    array_foreach(&global_local_statements, global_local)
+    {
+      global_local->reg = MIR_new_func_reg(
+        vm->ctx, vm->function->u.func, data_type_to_mir_type(global_local->data_type),
+        memory_sprintf("%s.%d", global_local->name.lexeme, global_local->index));
+    }
+
+    init_statements(vm, &vm->statements);
+    generate_statements(vm, &vm->statements);
+  }
+
+  MIR_append_insn(vm->ctx, vm->function, MIR_new_ret_insn(vm->ctx, 0));
+  MIR_finish_func(vm->ctx);
+  MIR_finish_module(vm->ctx);
+
+  if (vm->logging)
+    MIR_output(vm->ctx, stdout);
+
+  MIR_load_module(vm->ctx, vm->module);
+  MIR_gen_init(vm->ctx);
+  MIR_gen_set_optimize_level(vm->ctx, 3);
+  MIR_link(vm->ctx, MIR_set_gen_interface, NULL);
+
+  vm->start = (Start)MIR_gen(vm->ctx, vm->function);
+
+  GC_set_no_dls(true);
+
+  for (MIR_item_t item = DLIST_HEAD(MIR_item_t, vm->module->items); item != NULL;
+       item = DLIST_NEXT(MIR_item_t, item))
+  {
+    if (item->item_type != MIR_data_item)
+      continue;
+
+    if (item->u.data->el_type != MIR_T_I64)
+      continue;
+
+    GC_add_roots(item->addr, (char*)item->addr + sizeof(uintptr_t));
+  }
+
+  memory_reset();
+  return result;
+}
+
+void cyth_run(CyVM* vm)
+{
+  if (vm->start)
+    cyth_try_catch(vm, { vm->start(); });
+}
+
+void cyth_destroy(CyVM* vm)
+{
+  for (MIR_item_t item = DLIST_HEAD(MIR_item_t, vm->module->items); item != NULL;
+       item = DLIST_NEXT(MIR_item_t, item))
+  {
+    if (item->item_type != MIR_data_item)
+      continue;
+
+    if (item->u.data->el_type != MIR_T_I64)
+      continue;
+
+    GC_remove_roots(item->addr, (char*)item->addr + sizeof(uintptr_t));
+  }
+
+  MIR_gen_finish(vm->ctx);
+  MIR_finish(vm->ctx);
+  free(vm);
 }
 
 void cyth_set_error_callback(CyVM* vm,
@@ -4979,83 +5153,6 @@ clean_up:
   return result;
 }
 
-int cyth_compile(CyVM* vm)
-{
-  checker_init(vm->statements, vm->error_callback, NULL);
-  checker_validate();
-
-  bool result = !checker_errors();
-  if (result)
-  {
-    VarStmt* global_local;
-    ArrayVarStmt global_local_statements = checker_global_locals();
-    array_foreach(&global_local_statements, global_local)
-    {
-      global_local->reg = MIR_new_func_reg(
-        vm->ctx, vm->function->u.func, data_type_to_mir_type(global_local->data_type),
-        memory_sprintf("%s.%d", global_local->name.lexeme, global_local->index));
-    }
-
-    init_statements(vm, &vm->statements);
-    generate_statements(vm, &vm->statements);
-  }
-
-  MIR_append_insn(vm->ctx, vm->function, MIR_new_ret_insn(vm->ctx, 0));
-  MIR_finish_func(vm->ctx);
-  MIR_finish_module(vm->ctx);
-
-  if (vm->logging)
-    MIR_output(vm->ctx, stdout);
-
-  MIR_load_module(vm->ctx, vm->module);
-  MIR_gen_init(vm->ctx);
-  MIR_gen_set_optimize_level(vm->ctx, 3);
-  MIR_link(vm->ctx, MIR_set_gen_interface, NULL);
-
-  vm->start = (Start)MIR_gen(vm->ctx, vm->function);
-
-  GC_set_no_dls(true);
-
-  for (MIR_item_t item = DLIST_HEAD(MIR_item_t, vm->module->items); item != NULL;
-       item = DLIST_NEXT(MIR_item_t, item))
-  {
-    if (item->item_type != MIR_data_item)
-      continue;
-
-    if (item->u.data->el_type != MIR_T_I64)
-      continue;
-
-    GC_add_roots(item->addr, (char*)item->addr + sizeof(uintptr_t));
-  }
-
-  memory_reset();
-  return result;
-}
-
-void cyth_run(CyVM* vm)
-{
-  cyth_try_catch(vm, { vm->start(); });
-}
-
-void cyth_destroy(CyVM* vm)
-{
-  for (MIR_item_t item = DLIST_HEAD(MIR_item_t, vm->module->items); item != NULL;
-       item = DLIST_NEXT(MIR_item_t, item))
-  {
-    if (item->item_type != MIR_data_item)
-      continue;
-
-    if (item->u.data->el_type != MIR_T_I64)
-      continue;
-
-    GC_remove_roots(item->addr, (char*)item->addr + sizeof(uintptr_t));
-  }
-
-  MIR_gen_finish(vm->ctx);
-  MIR_finish(vm->ctx);
-  free(vm);
-}
-
 void* cyth_alloc(int atomic, uintptr_t size)
 {
   return atomic ? GC_malloc_atomic(size) : GC_malloc(size);
@@ -5091,87 +5188,6 @@ uintptr_t cyth_get_variable(CyVM* vm, const char* name)
   return 0;
 }
 
-uintptr_t sig_fp;
-CyVM* sig_vm;
-
-static void panic(CyVM* vm, const char* what, uintptr_t pc, uintptr_t fp)
-{
-  if (vm->panic_callback)
-    vm->panic_callback(what, 0, 0);
-
-  for (MIR_item_t item = DLIST_TAIL(MIR_item_t, vm->module->items); item != NULL;
-       item = DLIST_PREV(MIR_item_t, item))
-  {
-    if (item->item_type != MIR_func_item)
-      continue;
-
-    uintptr_t offset = 0;
-
-    for (MIR_insn_t insn = DLIST_HEAD(MIR_insn_t, item->u.func->insns); insn != NULL;
-         insn = DLIST_NEXT(MIR_insn_t, insn))
-    {
-      uintptr_t ptr = (uintptr_t)item->u.func->machine_code + offset;
-      if (pc >= ptr && pc < ptr + insn->size)
-      {
-        if (insn->line && insn->column)
-          if (vm->panic_callback)
-            vm->panic_callback(item->u.func->name, insn->line, insn->column);
-      }
-
-      offset += insn->size;
-    }
-  }
-
-  if (!fp)
-  {
-#if defined(__clang__) || defined(__GNUC__)
-    fp = (uintptr_t)__builtin_frame_address(0);
-#elif defined(_MSC_VER)
-    fp = (uintptr_t)_AddressOfReturnAddress() - 8;
-#endif
-  }
-
-  uintptr_t sig_fp_min = (uintptr_t)alloca(sizeof(uintptr_t));
-
-  while (fp >= sig_fp_min && fp <= sig_fp)
-  {
-    uintptr_t pc = *(uintptr_t*)(fp + sizeof(uintptr_t));
-
-    for (MIR_item_t item = DLIST_TAIL(MIR_item_t, vm->module->items); item != NULL;
-         item = DLIST_PREV(MIR_item_t, item))
-    {
-      if (item->item_type != MIR_func_item)
-        continue;
-
-      uintptr_t offset = 0;
-
-      for (MIR_insn_t insn = DLIST_HEAD(MIR_insn_t, item->u.func->insns); insn != NULL;
-           insn = DLIST_NEXT(MIR_insn_t, insn))
-      {
-        offset += insn->size;
-
-        uintptr_t ptr = (uintptr_t)item->u.func->machine_code + offset;
-        if (pc >= ptr && pc < ptr + insn->size)
-        {
-          if (insn->line && insn->column)
-            if (vm->panic_callback)
-              vm->panic_callback(item->u.func->name, insn->line, insn->column);
-        }
-      }
-    }
-
-    fp = *(uintptr_t*)fp;
-  }
-
-  if (vm->jmp == NULL)
-  {
-    fprintf(stderr, "Panic was not caught, terminating program!\n");
-    exit(-1);
-  }
-
-  cyth_longjmp(*vm->jmp, 1);
-}
-
 #ifdef _WIN32
 PVOID handler;
 static LONG WINAPI vector_handler(EXCEPTION_POINTERS* ExceptionInfo)
@@ -5193,15 +5209,15 @@ static LONG WINAPI vector_handler(EXCEPTION_POINTERS* ExceptionInfo)
   {
   case EXCEPTION_INT_DIVIDE_BY_ZERO:
   case EXCEPTION_FLT_DIVIDE_BY_ZERO:
-    panic(sig_vm, "Division by zero", pc, fp);
+    panic(panic_vm, "Division by zero", pc, fp);
     return EXCEPTION_CONTINUE_EXECUTION;
 
   case EXCEPTION_STACK_OVERFLOW:
-    panic(sig_vm, "Stack overflow", pc, fp);
+    panic(panic_vm, "Stack overflow", pc, fp);
     return EXCEPTION_CONTINUE_EXECUTION;
 
   case EXCEPTION_ACCESS_VIOLATION:
-    panic(sig_vm, "Invalid memory or null pointer access", pc, fp);
+    panic(panic_vm, "Invalid memory or null pointer access", pc, fp);
     return EXCEPTION_CONTINUE_EXECUTION;
 
   default:
@@ -5209,7 +5225,7 @@ static LONG WINAPI vector_handler(EXCEPTION_POINTERS* ExceptionInfo)
   }
 }
 #else
-static void sig_handler(int sig, siginfo_t* si, void* ctx)
+static void signal_handler(int sig, siginfo_t* si, void* ctx)
 {
   ucontext_t* uc = (ucontext_t*)ctx;
   uintptr_t pc = 0;
@@ -5255,15 +5271,15 @@ static void sig_handler(int sig, siginfo_t* si, void* ctx)
     uint8_t* fault = si->si_addr;
 
     if (fault < (uint8_t*)stack_base && fault >= (uint8_t*)stack_base - stack_size)
-      panic(sig_vm, "Stack overflow", pc, fp);
+      panic(panic_vm, "Stack overflow", pc, fp);
     else if (fault < (uint8_t*)0xffff)
-      panic(sig_vm, "Invalid memory or null pointer access", pc, fp);
+      panic(panic_vm, "Invalid memory or null pointer access", pc, fp);
     else
-      panic(sig_vm, "Internal runtime error", pc, fp);
+      panic(panic_vm, "Internal runtime error", pc, fp);
   }
   else if (sig == SIGFPE)
   {
-    panic(sig_vm, "Division by zero", pc, fp);
+    panic(panic_vm, "Division by zero", pc, fp);
   }
 }
 #endif
@@ -5287,10 +5303,10 @@ void* cyth_push_jmp(CyVM* vm, void* new)
     sa.sa_flags = SA_ONSTACK | SA_SIGINFO;
     sigemptyset(&sa.sa_mask);
 
-    sa.sa_sigaction = sig_handler;
+    sa.sa_sigaction = signal_handler;
     sigaction(SIGSEGV, &sa, NULL);
 
-    sa.sa_sigaction = sig_handler;
+    sa.sa_sigaction = signal_handler;
     sigaction(SIGFPE, &sa, NULL);
 #else
     ULONG size = 1024 * 1024;
@@ -5300,12 +5316,12 @@ void* cyth_push_jmp(CyVM* vm, void* new)
 #endif
 
 #if defined(__clang__) || defined(__GNUC__)
-    sig_fp = (uintptr_t)__builtin_frame_address(0);
+    panic_fp = (uintptr_t)__builtin_frame_address(0);
 #elif defined(_MSC_VER)
-    sig_fp = (uintptr_t)_AddressOfReturnAddress() - 8;
+    panic_fp = (uintptr_t)_AddressOfReturnAddress() - 8;
 #endif
 
-    sig_vm = vm;
+    panic_vm = vm;
   }
 
   return old;
@@ -5325,7 +5341,7 @@ void cyth_pop_jmp(CyVM* vm, void* old)
     sigaction(SIGFPE, NULL, NULL);
 #endif
 
-    sig_fp = 0;
-    sig_vm = NULL;
+    panic_fp = 0;
+    panic_vm = NULL;
   }
 }
