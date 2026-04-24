@@ -55,7 +55,8 @@ unsafe extern "C" {
         signature: *const c_char,
         func: *const c_void,
     ) -> c_int;
-    fn cyth_load_string(vm: *const c_void, source: *const c_char) -> c_int;
+    fn cyth_load_string(vm: *const c_void, filename: *const c_char, source: *const c_char)
+    -> c_int;
     fn cyth_compile(vm: *const c_void) -> c_int;
     fn cyth_run(vm: *const c_void);
     fn cyth_destroy(vm: *const c_void);
@@ -127,6 +128,7 @@ fn cyth_char_array_to_slice<'a>(cyth_array: *const CyArray<u8>) -> &'a [u8] {
 }
 
 extern "C" fn error_callback(
+    filename: *const c_char,
     start_line: c_int,
     start_column: c_int,
     end_line: c_int,
@@ -134,16 +136,25 @@ extern "C" fn error_callback(
     message: *const c_char,
 ) {
     let context = unsafe { &mut *CONTEXT };
+    let message = unsafe { CStr::from_ptr(message).to_str().unwrap_or("") };
+    let filename = unsafe { CStr::from_ptr(filename).to_str().unwrap_or("") };
 
-    context.output.push_str(&format!(
-        "{}:{}:{}-{}:{}: {}\n",
-        context.path,
-        context.mapping[(start_line - 1) as usize].0,
-        context.mapping[(start_line - 1) as usize].1 + start_column,
-        context.mapping[(end_line - 1) as usize].0,
-        context.mapping[(end_line - 1) as usize].1 + end_column,
-        unsafe { CStr::from_ptr(message).to_str().unwrap() }
-    ));
+    if filename == context.path {
+        context.output.push_str(&format!(
+            "{}:{}:{}-{}:{}: {}\n",
+            filename,
+            context.mapping[(start_line - 1) as usize].0,
+            context.mapping[(start_line - 1) as usize].1 + start_column,
+            context.mapping[(end_line - 1) as usize].0,
+            context.mapping[(end_line - 1) as usize].1 + end_column,
+            message
+        ));
+    } else {
+        context.output.push_str(&format!(
+            "{}:{}:{}-{}:{}: {}\n",
+            filename, start_line, start_column, end_line, end_column, message
+        ));
+    }
 }
 
 extern "C" fn panic_callback(function: *const c_char, line: c_int, column: c_int) {
@@ -182,7 +193,7 @@ struct Context {
     path: String,
 }
 
-const IMPORTS: &str = "
+const BUILTINS: &str = "
 Map<string, string> parseQuery(string query)
     Map<string, string> result = Map<string, string>()
 
@@ -1124,16 +1135,18 @@ fn request(mut req: Request, context: &mut Context, scripts: &mut HashMap<String
             context.path = path;
             context.mapping = mapping.clone();
             context.output.clear();
-    
-            let vm: *const c_void = cyth_init();
-            let imports  = CString::new(IMPORTS).unwrap();
-            let source = CString::new(source).unwrap();
 
+            let builtins = CString::new(BUILTINS).unwrap();
+            let builtins_filename = CString::new("<builtin>").unwrap();
+            let source = CString::new(source).unwrap();
+            let source_filename = CString::new(context.path.clone()).unwrap();
+
+            let vm = cyth_init();
             cyth_set_error_callback(vm, error_callback as *const c_void);
             cyth_set_panic_callback(vm, panic_callback as *const c_void);
-            cyth_load_string(vm, imports.as_ptr());
-        
-            let load_result = cyth_load_string(vm, source.as_ptr());
+            cyth_load_string(vm, builtins_filename.as_ptr(), builtins.as_ptr());
+
+            let load_result = cyth_load_string(vm, source_filename.as_ptr(), source.as_ptr());
             let compilation_result = compile_script(vm);
 
             if load_result == 0 || compilation_result == 0 {

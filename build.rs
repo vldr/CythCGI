@@ -18,13 +18,5 @@ fn main() {
         .file("vendor/cyth/third_party/mir/mir-gen.c")
         .file("vendor/cyth/third_party/bdwgc/extra/gc.c");
 
-    if cfg!(target_os = "windows") {
-        if cfg!(target_arch = "x86_64") {
-            build.file("vendor/cyth/src/longjmp.x64.asm");
-        } else {
-            build.file("vendor/cyth/src/longjmp.arm64.asm");
-        }
-    }
-
     build.compile("cyth");
 }

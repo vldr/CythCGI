@@ -15,8 +15,8 @@ static struct
 
   bool error;
   int errors;
-  void (*error_callback)(int start_line, int start_column, int end_line, int end_column,
-                         const char* message);
+  void (*error_callback)(const char* filename, int start_line, int start_column, int end_line,
+                         int end_column, const char* message);
 } parser;
 
 static void statements(ArrayStmt* stmts);
@@ -29,8 +29,8 @@ static void error(Token token, const char* message)
 {
   if (!parser.error)
     if (parser.error_callback)
-      parser.error_callback(token.start_line, token.start_column, token.end_line, token.end_column,
-                            message);
+      parser.error_callback(token.filename, token.start_line, token.start_column, token.end_line,
+                            token.end_column, message);
 
   parser.error = true;
   parser.errors++;
@@ -214,6 +214,7 @@ static Token combine_tokens(Token start_token, Token end_token)
     end_token.end_column,
     0,
     "",
+    start_token.filename,
   };
 }
 
@@ -515,6 +516,9 @@ static Expr* primary(void)
     {
       do
       {
+        if (check(TOKEN_RIGHT_BRACKET))
+          break;
+
         Token start_token = peek();
         Expr* value = expression();
         Token end_token = previous();
@@ -648,15 +652,7 @@ static Expr* call(void)
       is->type = EXPR_IS;
       is->is.is_data_type_token = consume_data_type("Expected a type after 'is' keyword.");
       is->is.expr = expr;
-      is->is.expr_token = (Token){
-        TOKEN_IDENTIFIER,
-        start_token.start_line,
-        start_token.start_column,
-        end_token.end_line,
-        end_token.end_column,
-        0,
-        "",
-      };
+      is->is.expr_token = combine_tokens(start_token, end_token);
 
       expr = is;
     }
@@ -1304,7 +1300,7 @@ static Stmt* while_statement(void)
   return stmt;
 }
 
-static Stmt* for_in_statement(DataTypeToken type, Token name, Stmt* stmt)
+static Stmt* for_in_statement(bool parenthesis, DataTypeToken type, Token name, Stmt* stmt)
 {
   Token start_token = peek();
   Expr* list = cast_to_array(type, expression());
@@ -1408,7 +1404,10 @@ static Stmt* for_in_statement(DataTypeToken type, Token name, Stmt* stmt)
     array_add(&stmt->loop.incrementer, incrementer);
   }
 
-  consume(TOKEN_NEWLINE, "Expected a newline.");
+  if (parenthesis)
+    consume(TOKEN_RIGHT_PAREN, "Expected a ')' at the end of the for-loop.");
+
+  consume(TOKEN_NEWLINE, "Expected a newline at the end of the for-loop.");
 
   array_init(&stmt->loop.body);
   if (check(TOKEN_INDENT))
@@ -1455,6 +1454,8 @@ static Stmt* for_statement(void)
   stmt->type = STMT_WHILE;
   stmt->loop.keyword = advance();
 
+  bool parenthesis = match(TOKEN_LEFT_PAREN);
+
   array_init(&stmt->loop.initializer);
   array_init(&stmt->loop.incrementer);
 
@@ -1469,7 +1470,7 @@ static Stmt* for_statement(void)
 
       if (match(TOKEN_IN))
       {
-        return for_in_statement(type, name, stmt);
+        return for_in_statement(parenthesis, type, name, stmt);
       }
       else
       {
@@ -1505,7 +1506,7 @@ static Stmt* for_statement(void)
 
   consume(TOKEN_SEMICOLON, "Expected a semicolon after condition.");
 
-  if (!check(TOKEN_NEWLINE))
+  if (!check(TOKEN_NEWLINE) && !(parenthesis && check(TOKEN_RIGHT_PAREN)))
   {
   add_incrementer:
 
@@ -1517,7 +1518,10 @@ static Stmt* for_statement(void)
     }
   }
 
-  consume(TOKEN_NEWLINE, "Expected a newline after incrementer.");
+  if (parenthesis)
+    consume(TOKEN_RIGHT_PAREN, "Expected a ')' at the end of the for-loop.");
+
+  consume(TOKEN_NEWLINE, "Expected a newline at the end of the for-loop.");
 
   array_init(&stmt->loop.body);
 
@@ -1613,8 +1617,8 @@ static void statements(ArrayStmt* stmts)
 }
 
 void parser_init(ArrayToken tokens,
-                 void (*error_callback)(int start_line, int start_column, int end_line,
-                                        int end_column, const char* message))
+                 void (*error_callback)(const char* filename, int start_line, int start_column,
+                                        int end_line, int end_column, const char* message))
 {
   parser.tokens = tokens;
   parser.classes = 0;

@@ -407,8 +407,7 @@ static void machinize_call (gen_ctx_t gen_ctx, MIR_insn_t call_insn) {
 
         /* copy debug info during call */
         if (prev_call_insn) {
-          new_insn->line = prev_call_insn->line;
-          new_insn->column = prev_call_insn->column;
+          new_insn->location = prev_call_insn->location;
         }
       } else {
         assert (arg_op.mode == MIR_OP_VAR_MEM);
@@ -2924,8 +2923,8 @@ static const char *nop_pats[] = {
   "",
   "\x90" /* 1:nop */,
   "\x66\x90", /* 2: xchg ax,ax */
-  "\x0f\x1f\xc0" /* 3:nopl eax */,
-  "\x48\x0f\x1f\xc0" /* 4:nop rax */,
+  "\x0f\x1f\x00" /* 3:nopl (%rax) */,
+  "\x0f\x1f\x40\x00" /* 4:nopl (%rax) */,
   "\x0f\x1f\x44\x00\x00" /* 5: nopl 0x0(%rax,%rax,1) */,
   "\x66\x0f\x1f\x44\x00\x00" /* 6: nopw   0x0(%rax,%rax,1) */,
   "\x0f\x1f\x80\x00\x00\x00\x00" /* 7: nopl 0x0(%rax) */,

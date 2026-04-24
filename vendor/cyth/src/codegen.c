@@ -78,14 +78,14 @@ static struct
   MapStringBinaryenHeapType heap_types;
   BinaryenHeapType string_heap_type;
   BinaryenType string_type;
-  MapSInt string_constants;
+  MapStrbufInt string_constants;
   ArrayDebugInfo debug_info;
   const char* function;
   int strings;
   int loop;
 
-  void (*error_callback)(int start_line, int start_column, int end_line, int end_column,
-                         const char* message);
+  void (*error_callback)(const char* filename, int start_line, int start_column, int end_line,
+                         int end_column, const char* message);
   void (*result_callback)(size_t size, void* data, size_t source_map_size, void* source_map);
   void (*link_callback)(int ref_line, int ref_column, int def_line, int def_column, int length);
 } codegen;
@@ -3418,26 +3418,35 @@ static BinaryenExpressionRef generate_group_expression(GroupExpr* expression)
 
 static BinaryenExpressionRef generate_string_literal_expression(const char* literal, int length)
 {
-  int index = map_get_sint(&codegen.string_constants, literal);
-  if (!index)
+  if (length == -1)
+    length = strlen(literal);
+
+  Strbuf key = { .data = literal, .length = length };
+  int value = map_get_strbuf_int(&codegen.string_constants, &key);
+
+  if (!value)
   {
-    index = ++codegen.strings;
-    map_put_sint(&codegen.string_constants, literal, index);
+    value = ++codegen.strings;
 
     ArrayBinaryenExpressionRef values;
     array_init(&values);
 
-    for (int i = 0; i < length || (length == -1 && literal[i] != '\0'); i++)
+    for (int i = 0; i < length; i++)
       array_add(&values, BinaryenConst(codegen.module, BinaryenLiteralInt32(literal[i])));
 
     BinaryenExpressionRef initializer =
       BinaryenArrayNewFixed(codegen.module, codegen.string_heap_type, values.elems, values.size);
 
-    const char* name = memory_sprintf("string.%d", index);
+    const char* name = memory_sprintf("string.%d", value);
     BinaryenAddGlobal(codegen.module, name, codegen.string_type, false, initializer);
+
+    Strbuf* key = ALLOC(Strbuf);
+    key->data = literal;
+    key->length = length;
+    map_put_strbuf_int(&codegen.string_constants, key, value);
   }
 
-  const char* name = memory_sprintf("string.%d", index);
+  const char* name = memory_sprintf("string.%d", value);
   return BinaryenGlobalGet(codegen.module, name, codegen.string_type);
 }
 
@@ -4918,10 +4927,10 @@ static BinaryenExpressionRef generate_statements(ArrayStmt* statements)
   return block;
 }
 
-int cyth_wasm_init(char* string)
+int cyth_wasm_init(char* filename, const char* source)
 {
   array_init(&codegen.statements);
-  lexer_init(string, codegen.error_callback);
+  lexer_init(filename, source, codegen.error_callback);
   ArrayToken tokens = lexer_scan();
 
   if (lexer_errors())
@@ -4945,7 +4954,7 @@ int cyth_wasm_init(char* string)
 
 int cyth_wasm_load_function(const char* signature, const char* module)
 {
-  lexer_init((char*)signature, codegen.error_callback);
+  lexer_init(signature, (char*)signature, codegen.error_callback);
   ArrayToken tokens = lexer_scan();
 
   if (lexer_errors())
@@ -4990,7 +4999,7 @@ int cyth_wasm_compile(int compile, int logging)
   TypeBuilderBuildAndDispose(type_builder, &codegen.string_heap_type, 0, 0);
 
   codegen.string_type = BinaryenTypeFromHeapType(codegen.string_heap_type, false);
-  map_init_sint(&codegen.string_constants, 0, 0);
+  map_init_strbuf_int(&codegen.string_constants, 0, 0);
   map_init_string_binaryen_heap_type(&codegen.heap_types, 0, 0);
 
   BinaryenExpressionRef body = generate_statements(&codegen.statements);
@@ -5043,9 +5052,9 @@ clean_up:
   return result;
 }
 
-void cyth_wasm_set_error_callback(void (*error_callback)(int start_line, int start_column,
-                                                         int end_line, int end_column,
-                                                         const char* message))
+void cyth_wasm_set_error_callback(void (*error_callback)(const char* filename, int start_line,
+                                                         int start_column, int end_line,
+                                                         int end_column, const char* message))
 {
   codegen.error_callback = error_callback;
 }

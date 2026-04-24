@@ -34,8 +34,8 @@ static struct
   bool error;
   int errors;
 
-  void (*error_callback)(int start_line, int start_column, int end_line, int end_column,
-                         const char* message);
+  void (*error_callback)(const char* filename, int start_line, int start_column, int end_line,
+                         int end_column, const char* message);
   void (*link_callback)(int ref_line, int ref_column, int def_line, int def_column, int length);
 } checker;
 
@@ -75,8 +75,8 @@ static void error(Token token, const char* message)
 
   if (!checker.error)
     if (checker.error_callback)
-      checker.error_callback(token.start_line, token.start_column, token.end_line, token.end_column,
-                             message);
+      checker.error_callback(token.filename, token.start_line, token.start_column, token.end_line,
+                             token.end_column, message);
 
   checker.error = true;
   checker.errors++;
@@ -1745,10 +1745,6 @@ static void init_function_declaration(FuncStmt* statement)
 static void init_class_template_declaration(ClassTemplateStmt* statement)
 {
   const char* name = statement->name.lexeme;
-  if (environment_check_variable(checker.environment, name))
-  {
-    error_name_already_exists(statement->name, name);
-  }
 
   MapSInt type_set;
   map_init_sint(&type_set, 0, 0);
@@ -1775,7 +1771,10 @@ static void init_class_template_declaration(ClassTemplateStmt* statement)
   variable->data_type = DATA_TYPE(TYPE_PROTOTYPE_TEMPLATE);
   variable->data_type.class_template = statement;
 
-  environment_set_variable(checker.environment, name, variable);
+  if (environment_check_variable(checker.environment, name))
+    error_name_already_exists(statement->name, name);
+  else
+    environment_set_variable(checker.environment, name, variable);
 }
 
 static void init_function_template_declaration(FuncTemplateStmt* statement)
@@ -1851,10 +1850,6 @@ static void init_function_template_declaration(FuncTemplateStmt* statement)
 static void init_class_declaration(ClassStmt* statement)
 {
   const char* name = statement->name.lexeme;
-  if (environment_check_variable(checker.environment, name))
-  {
-    error_name_already_exists(statement->name, name);
-  }
 
   VarStmt* variable = ALLOC(VarStmt);
   variable->name = statement->name;
@@ -1869,7 +1864,10 @@ static void init_class_declaration(ClassStmt* statement)
   variable->data_type = DATA_TYPE(TYPE_PROTOTYPE);
   variable->data_type.class = statement;
 
-  environment_set_variable(checker.environment, name, variable);
+  if (environment_check_variable(checker.environment, name))
+    error_name_already_exists(statement->name, name);
+  else
+    environment_set_variable(checker.environment, name, variable);
 }
 
 static void init_variable_declaration(VarStmt* statement)
@@ -1902,11 +1900,6 @@ static void init_variable_declaration(VarStmt* statement)
     }
   }
 
-  if (environment_check_variable(environment, name))
-  {
-    error_name_already_exists(statement->name, name);
-  }
-
   if (statement->type.type == DATA_TYPE_TOKEN_NONE)
   {
     statement->data_type = statement->initializer_data_type;
@@ -1926,7 +1919,10 @@ static void init_variable_declaration(VarStmt* statement)
     array_add(&checker.function->variables, statement);
   }
 
-  environment_set_variable(environment, name, statement);
+  if (environment_check_variable(environment, name))
+    error_name_already_exists(statement->name, name);
+  else
+    environment_set_variable(environment, name, statement);
 }
 
 static void init_class_declaration_body(ClassStmt* statement)
@@ -1948,7 +1944,7 @@ static void init_class_declaration_body(ClassStmt* statement)
     const char* function_name = function_statement->name.lexeme;
 
     function_statement->name.lexeme = memory_sprintf("%s.%s", class_name, function_name);
-    function_statement->name.length = strlen(statement->name.lexeme);
+    function_statement->name.length = strlen(function_statement->name.lexeme);
   }
 
   FuncTemplateStmt* function_template;
@@ -1960,7 +1956,7 @@ static void init_class_declaration_body(ClassStmt* statement)
     const char* function_name = function_template->name.lexeme;
 
     function_template->name.lexeme = memory_sprintf("%s.%s", class_name, function_name);
-    function_template->name.length = strlen(statement->name.lexeme);
+    function_template->name.length = strlen(function_template->name.lexeme);
   }
 
   int count = 0;
@@ -2699,7 +2695,11 @@ static DataType check_call_expression(CallExpr* expression)
     {
       argument = EXPR();
       argument->type = EXPR_VAR;
-      argument->var.name = (Token){ .lexeme = "this", .length = sizeof("this") - 1 };
+      argument->var.name = (Token){
+        .length = sizeof("this") - 1,
+        .lexeme = "this",
+        .filename = function->name.filename,
+      };
       argument->var.variable = array_at(&function->parameters, 0);
       argument->var.template_types = NULL;
       argument->var.data_type = DATA_TYPE(TYPE_OBJECT);
@@ -2733,6 +2733,7 @@ static DataType check_call_expression(CallExpr* expression)
       {
         error_type_mismatch(expression->argument_tokens.elems[i - 1], parameter_data_type,
                             argument_data_type);
+        checker.error = false;
       }
     }
 
@@ -2772,6 +2773,7 @@ static DataType check_call_expression(CallExpr* expression)
       {
         error_type_mismatch(expression->argument_tokens.elems[i], parameter_data_type,
                             argument_data_type);
+        checker.error = false;
       }
     }
 
@@ -2834,6 +2836,7 @@ static DataType check_call_expression(CallExpr* expression)
           argument_token = expression->argument_tokens.elems[i];
 
         error_type_mismatch(argument_token, parameter_data_type, argument_data_type);
+        checker.error = false;
       }
     }
 
@@ -2871,7 +2874,9 @@ static DataType check_call_expression(CallExpr* expression)
         return DATA_TYPE(TYPE_VOID);
       }
 
-      FuncStmt* function = function_data_type.function;
+      FuncStmt* function = function_data_type.type == TYPE_FUNCTION
+                             ? function_data_type.function
+                             : function_data_type.function_member.function;
       int number_of_arguments = array_size(&expression->arguments);
       int expected_number_of_arguments = array_size(&function->parameters);
 
@@ -2897,6 +2902,7 @@ static DataType check_call_expression(CallExpr* expression)
         {
           error_type_mismatch(expression->argument_tokens.elems[i - 1], parameter_data_type,
                               argument_data_type);
+          checker.error = false;
         }
       }
 
@@ -3592,6 +3598,8 @@ static DataType check_index_expression(IndexExpr* expression)
                                              value_data_type);
         return DATA_TYPE(TYPE_VOID);
       }
+
+      link(checker.assignment->op, function->name, checker.assignment->op.length);
     }
 
     expression->function = function;
@@ -4014,7 +4022,7 @@ static void check_function_declaration(FuncStmt* statement)
 
     check_binary_overload_function_declaration(statement, "__mod__");
     check_binary_overload_function_declaration(statement, "__and__");
-    check_binary_overload_function_declaration(statement, "__or_");
+    check_binary_overload_function_declaration(statement, "__or__");
     check_binary_overload_function_declaration(statement, "__xor__");
     check_binary_overload_function_declaration(statement, "__lshift__");
     check_binary_overload_function_declaration(statement, "__rshift__");
@@ -4175,8 +4183,8 @@ static bool analyze_statements(ArrayStmt statements)
 }
 
 void checker_init(ArrayStmt statements,
-                  void (*error_callback)(int start_line, int start_column, int end_line,
-                                         int end_column, const char* message),
+                  void (*error_callback)(const char* filename, int start_line, int start_column,
+                                         int end_line, int end_column, const char* message),
                   void (*link_callback)(int ref_line, int ref_column, int def_line, int def_column,
                                         int length))
 {

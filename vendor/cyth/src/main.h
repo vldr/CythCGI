@@ -3,6 +3,10 @@
 
 #include <stdio.h>
 
+#ifdef _WIN32
+#include <malloc.h>
+#endif
+
 #if defined(_MSC_VER)
 #define trap() __debugbreak()
 #elif defined(__clang__)
@@ -11,6 +15,12 @@
 #define trap() __builtin_trap()
 #else
 #define trap() ((void)0)
+#endif
+
+#if defined(_MSC_VER)
+#define unreach() __assume(0)
+#else
+#define unreach() __builtin_unreachable()
 #endif
 
 #define assert(expr)                                                                               \
@@ -24,22 +34,11 @@
     }                                                                                              \
   } while (0)
 
-#ifdef _WIN32
-#include <malloc.h>
-
 #define UNREACHABLE(message)                                                                       \
   do                                                                                               \
   {                                                                                                \
     assert(!message);                                                                              \
-    __assume(0);                                                                                   \
+    unreach();                                                                                     \
   } while (0)
-#else
-#define UNREACHABLE(message)                                                                       \
-  do                                                                                               \
-  {                                                                                                \
-    assert(!message);                                                                              \
-    __builtin_unreachable();                                                                       \
-  } while (0)
-#endif
 
 #endif

@@ -54,7 +54,7 @@ struct _CY_VM
 
   ArrayStmt statements;
   MapS64 typeids;
-  MapMIR_item string_constants;
+  MapStrbufMIR_item string_constants;
   MapMIR_item items;
   MapFunction functions;
 
@@ -71,14 +71,14 @@ struct _CY_VM
   Function string_char_cast;
 
   int logging;
-  void (*error_callback)(int start_line, int start_column, int end_line, int end_column,
-                         const char* message);
+  void (*error_callback)(const char* filename, int start_line, int start_column, int end_line,
+                         int end_column, const char* message);
   void (*panic_callback)(const char* function, int line, int column);
 };
 
 static void generate_default_initialization(CyVM* vm, MIR_reg_t dest, DataType data_type);
-static void generate_string_cast(CyVM* vm, MIR_reg_t dest, MIR_reg_t expr, MIR_reg_t depth,
-                                 MIR_reg_t list, DataType data_type);
+static void generate_string_cast(CyVM* vm, Token token, MIR_reg_t dest, MIR_reg_t expr,
+                                 MIR_reg_t depth, MIR_reg_t list, DataType data_type);
 static void generate_expression(CyVM* vm, MIR_reg_t dest, Expr* expression);
 static void generate_statement(CyVM* vm, Stmt* statement);
 static void generate_statements(CyVM* vm, ArrayStmt* statements);
@@ -100,17 +100,33 @@ static void panic(CyVM* vm, const char* what, uintptr_t pc, uintptr_t fp)
     if (item->item_type != MIR_func_item)
       continue;
 
+    const uintptr_t base = (uintptr_t)item->u.func->machine_code;
+    if (pc < base || pc >= base + item->u.func->length)
+      continue;
+
     uintptr_t offset = 0;
 
     for (MIR_insn_t insn = DLIST_HEAD(MIR_insn_t, item->u.func->insns); insn != NULL;
          insn = DLIST_NEXT(MIR_insn_t, insn))
     {
-      uintptr_t ptr = (uintptr_t)item->u.func->machine_code + offset;
+      const uintptr_t ptr = base + offset;
       if (pc >= ptr && pc < ptr + insn->size)
       {
-        if (insn->line && insn->column)
+        if (insn->location.name && insn->location.line && insn->location.column)
+        {
           if (vm->panic_callback)
-            vm->panic_callback(item->u.func->name, insn->line, insn->column);
+            vm->panic_callback(insn->location.name, insn->location.line, insn->location.column);
+
+          MIR_location_t* location = MIR_get_location(vm->ctx, insn->location.next);
+          while (location)
+          {
+            if (location->name && location->line && location->column)
+              if (vm->panic_callback)
+                vm->panic_callback(location->name, location->line, location->column);
+
+            location = MIR_get_location(vm->ctx, location->next);
+          }
+        }
       }
 
       offset += insn->size;
@@ -138,6 +154,10 @@ static void panic(CyVM* vm, const char* what, uintptr_t pc, uintptr_t fp)
       if (item->item_type != MIR_func_item)
         continue;
 
+      const uintptr_t base = (uintptr_t)item->u.func->machine_code;
+      if (pc < base || pc >= base + item->u.func->length)
+        continue;
+
       uintptr_t offset = 0;
 
       for (MIR_insn_t insn = DLIST_HEAD(MIR_insn_t, item->u.func->insns); insn != NULL;
@@ -145,12 +165,24 @@ static void panic(CyVM* vm, const char* what, uintptr_t pc, uintptr_t fp)
       {
         offset += insn->size;
 
-        uintptr_t ptr = (uintptr_t)item->u.func->machine_code + offset;
+        const uintptr_t ptr = base + offset;
         if (pc >= ptr && pc < ptr + insn->size)
         {
-          if (insn->line && insn->column)
+          if (insn->location.name && insn->location.line && insn->location.column)
+          {
             if (vm->panic_callback)
-              vm->panic_callback(item->u.func->name, insn->line, insn->column);
+              vm->panic_callback(insn->location.name, insn->location.line, insn->location.column);
+
+            MIR_location_t* location = MIR_get_location(vm->ctx, insn->location.next);
+            while (location)
+            {
+              if (location->name && location->line && location->column)
+                if (vm->panic_callback)
+                  vm->panic_callback(location->name, location->line, location->column);
+
+              location = MIR_get_location(vm->ctx, location->next);
+            }
+          }
         }
       }
     }
@@ -164,7 +196,7 @@ static void panic(CyVM* vm, const char* what, uintptr_t pc, uintptr_t fp)
     exit(-1);
   }
 
-  cyth_longjmp(*vm->jmp, 1);
+  cyth_longjmp()(*vm->jmp, 1);
 }
 
 static void panic_callback(const char* function, int line, int column)
@@ -199,11 +231,11 @@ static void panic_callback(const char* function, int line, int column)
   previous_column = column;
 }
 
-static void error_callback(int start_line, int start_column, int end_line, int end_column,
-                           const char* message)
+static void error_callback(const char* filename, int start_line, int start_column, int end_line,
+                           int end_column, const char* message)
 {
-  fprintf(stderr, "%d:%d-%d:%d: error: %s\n", start_line, start_column, end_line, end_column,
-          message);
+  fprintf(stderr, "%s%s%d:%d-%d:%d: error: %s\n", filename ? filename : "", filename ? ":" : "",
+          start_line, start_column, end_line, end_column, message);
 }
 
 static int string_equals(CyString* left, CyString* right)
@@ -444,10 +476,11 @@ static FuncStmt* get_function_member(DataType data_type, const char* name)
   return function;
 }
 
-static MIR_insn_t generate_debug_info(Token token, MIR_insn_t insn)
+static MIR_insn_t generate_debug_info(CyVM* vm, Token token, MIR_insn_t insn)
 {
-  insn->line = token.start_line;
-  insn->column = token.start_column;
+  insn->location.line = token.start_line;
+  insn->location.column = token.start_column;
+  insn->location.name = vm->function->u.func->name;
 
   return insn;
 }
@@ -478,39 +511,45 @@ static void generate_realloc_expression(CyVM* vm, MIR_op_t dest, MIR_op_t ptr, M
 static void generate_string_literal_expression(CyVM* vm, MIR_op_t dest, const char* literal,
                                                int length)
 {
-  MIR_item_t item = map_get_mir_item(&vm->string_constants, literal);
-  if (!item)
-  {
-    if (length == -1)
-      length = strlen(literal);
+  if (length == -1)
+    length = strlen(literal);
 
+  Strbuf key = { .data = literal, .length = length };
+  MIR_item_t value = map_get_strbuf_mir_item(&vm->string_constants, &key);
+
+  if (!value)
+  {
     uintptr_t size = sizeof(CyString) + length + 1;
     CyString* string = memory_alloc(size);
     string->size = length;
     string->data[length] = '\0';
     memcpy(string->data, literal, length);
 
-    const char* name = memory_sprintf("string.%d", map_size_mir_item(&vm->string_constants));
-    item = MIR_new_data(vm->ctx, name, MIR_T_U8, size, string);
+    const char* name = memory_sprintf("string.%d", map_size_strbuf_mir_item(&vm->string_constants));
+    value = MIR_new_data(vm->ctx, name, MIR_T_U8, size, string);
 
-    map_put_mir_item(&vm->string_constants, literal, item);
+    Strbuf* key = ALLOC(Strbuf);
+    key->data = literal;
+    key->length = length;
+    map_put_strbuf_mir_item(&vm->string_constants, key, value);
   }
 
   MIR_append_insn(vm->ctx, vm->function,
                   MIR_new_insn(vm->ctx, data_type_to_mov_type(DATA_TYPE(TYPE_STRING)), dest,
-                               MIR_new_ref_op(vm->ctx, item)));
+                               MIR_new_ref_op(vm->ctx, value)));
 }
 
 static void generate_panic(CyVM* vm, const char* what, Token token)
 {
-  MIR_append_insn(vm->ctx, vm->function,
-                  generate_debug_info(
-                    token, MIR_new_call_insn(vm->ctx, 6, MIR_new_ref_op(vm->ctx, vm->panic.proto),
-                                             MIR_new_ref_op(vm->ctx, vm->panic.func),
-                                             MIR_new_int_op(vm->ctx, (uint64_t)vm),
-                                             MIR_new_int_op(vm->ctx, (uint64_t)what),
-                                             MIR_new_int_op(vm->ctx, (uint64_t)0),
-                                             MIR_new_int_op(vm->ctx, (uint64_t)0))));
+  MIR_append_insn(
+    vm->ctx, vm->function,
+    generate_debug_info(vm, token,
+                        MIR_new_call_insn(vm->ctx, 6, MIR_new_ref_op(vm->ctx, vm->panic.proto),
+                                          MIR_new_ref_op(vm->ctx, vm->panic.func),
+                                          MIR_new_int_op(vm->ctx, (uint64_t)vm),
+                                          MIR_new_int_op(vm->ctx, (uint64_t)what),
+                                          MIR_new_int_op(vm->ctx, (uint64_t)0),
+                                          MIR_new_int_op(vm->ctx, (uint64_t)0))));
 }
 
 static MIR_op_t generate_array_length_op(CyVM* vm, MIR_reg_t ptr)
@@ -836,7 +875,7 @@ static Function* generate_array_pop_function(CyVM* vm, DataType data_type)
 
       MIR_append_insn(vm->ctx, vm->function, panic_label);
 
-      generate_panic(vm, "Out of bounds access", (Token){ 0 });
+      generate_panic(vm, "Out of bounds access", TOKEN_EMPTY());
 
       MIR_append_insn(vm->ctx, vm->function, finish_label);
     }
@@ -1131,7 +1170,7 @@ static Function* generate_array_reserve_function(CyVM* vm, DataType data_type)
 
       MIR_append_insn(vm->ctx, vm->function, panic_label);
 
-      generate_panic(vm, "Invalid reservation amount", (Token){ 0 });
+      generate_panic(vm, "Invalid reservation amount", TOKEN_EMPTY());
 
       MIR_append_insn(vm->ctx, vm->function, continue_label);
     }
@@ -2302,7 +2341,7 @@ static void generate_binary_expression_function_call(CyVM* vm, MIR_reg_t dest,
                           MIR_new_reg_op(vm->ctx, dest), MIR_new_reg_op(vm->ctx, left),
                           MIR_new_reg_op(vm->ctx, right));
 
-  MIR_append_insn(vm->ctx, vm->function, insn);
+  MIR_append_insn(vm->ctx, vm->function, generate_debug_info(vm, expression->op, insn));
 }
 
 static void generate_binary_expression(CyVM* vm, MIR_reg_t dest, BinaryExpr* expression)
@@ -2694,11 +2733,11 @@ static void generate_binary_expression(CyVM* vm, MIR_reg_t dest, BinaryExpr* exp
     UNREACHABLE("Unhandled binary operation");
   }
 
-  MIR_append_insn(
-    vm->ctx, vm->function,
-    generate_debug_info(expression->op, MIR_new_insn(vm->ctx, op, MIR_new_reg_op(vm->ctx, dest),
-                                                     MIR_new_reg_op(vm->ctx, left),
-                                                     MIR_new_reg_op(vm->ctx, right))));
+  MIR_append_insn(vm->ctx, vm->function,
+                  generate_debug_info(vm, expression->op,
+                                      MIR_new_insn(vm->ctx, op, MIR_new_reg_op(vm->ctx, dest),
+                                                   MIR_new_reg_op(vm->ctx, left),
+                                                   MIR_new_reg_op(vm->ctx, right))));
 }
 
 static void generate_unary_expression(CyVM* vm, MIR_reg_t dest, UnaryExpr* expression)
@@ -2775,7 +2814,7 @@ static void generate_unary_expression(CyVM* vm, MIR_reg_t dest, UnaryExpr* expre
   }
 }
 
-static Function* generate_string_array_cast_function(CyVM* vm, DataType data_type)
+static Function* generate_string_array_cast_function(CyVM* vm, Token token, DataType data_type)
 {
   const char* name = memory_sprintf("string.array_cast.%s", data_type_to_string(data_type));
 
@@ -2890,7 +2929,7 @@ static Function* generate_string_array_cast_function(CyVM* vm, DataType data_typ
                                         MIR_new_reg_op(vm->ctx, tmp), MIR_new_reg_op(vm->ctx, tmp),
                                         MIR_new_reg_op(vm->ctx, depth)));
 
-      generate_string_cast(vm, tmp, expr, depth, list, element_data_type);
+      generate_string_cast(vm, token, tmp, expr, depth, list, element_data_type);
 
       MIR_append_insn(vm->ctx, vm->function,
                       MIR_new_call_insn(
@@ -2982,7 +3021,7 @@ static Function* generate_string_array_cast_function(CyVM* vm, DataType data_typ
   return function;
 }
 
-static Function* generate_string_object_cast_function(CyVM* vm, DataType data_type)
+static Function* generate_string_object_cast_function(CyVM* vm, Token token, DataType data_type)
 {
   const char* name = memory_sprintf("string.object_cast.%s", data_type_to_string(data_type));
 
@@ -3256,7 +3295,7 @@ static Function* generate_string_object_cast_function(CyVM* vm, DataType data_ty
                                         MIR_new_reg_op(vm->ctx, depth)));
 
       generate_string_literal_expression(vm, MIR_new_reg_op(vm->ctx, tmp2), "", -1);
-      generate_string_cast(vm, tmp2, expr, depth, list, variable->data_type);
+      generate_string_cast(vm, token, tmp2, expr, depth, list, variable->data_type);
 
       if (_i + 1 == class->variables.size)
         generate_string_literal_expression(vm, MIR_new_reg_op(vm->ctx, tmp3),
@@ -3306,8 +3345,8 @@ static Function* generate_string_object_cast_function(CyVM* vm, DataType data_ty
   return function;
 }
 
-static void generate_string_cast(CyVM* vm, MIR_reg_t dest, MIR_reg_t expr, MIR_reg_t depth,
-                                 MIR_reg_t list, DataType data_type)
+static void generate_string_cast(CyVM* vm, Token token, MIR_reg_t dest, MIR_reg_t expr,
+                                 MIR_reg_t depth, MIR_reg_t list, DataType data_type)
 {
   switch (data_type.type)
   {
@@ -3346,7 +3385,7 @@ static void generate_string_cast(CyVM* vm, MIR_reg_t dest, MIR_reg_t expr, MIR_r
                                  MIR_new_reg_op(vm->ctx, dest), MIR_new_reg_op(vm->ctx, expr)));
     return;
   case TYPE_ARRAY: {
-    Function* function = generate_string_array_cast_function(vm, data_type);
+    Function* function = generate_string_array_cast_function(vm, token, data_type);
     MIR_append_insn(vm->ctx, vm->function,
                     MIR_new_call_insn(vm->ctx, 7, MIR_new_ref_op(vm->ctx, function->proto),
                                       MIR_new_ref_op(vm->ctx, function->func),
@@ -3362,11 +3401,13 @@ static void generate_string_cast(CyVM* vm, MIR_reg_t dest, MIR_reg_t expr, MIR_r
       Function* string_concat = generate_string_concat_function(vm, 2);
       MIR_reg_t tmp = _MIR_new_temp_reg(vm->ctx, MIR_T_I64, vm->function->u.func);
 
-      MIR_append_insn(vm->ctx, vm->function,
-                      MIR_new_call_insn(vm->ctx, 4, MIR_new_ref_op(vm->ctx, function->proto),
-                                        MIR_new_ref_op(vm->ctx, function->item),
-                                        MIR_new_reg_op(vm->ctx, tmp),
-                                        MIR_new_reg_op(vm->ctx, expr)));
+      MIR_append_insn(
+        vm->ctx, vm->function,
+        generate_debug_info(vm, token,
+                            MIR_new_call_insn(vm->ctx, 4, MIR_new_ref_op(vm->ctx, function->proto),
+                                              MIR_new_ref_op(vm->ctx, function->item),
+                                              MIR_new_reg_op(vm->ctx, tmp),
+                                              MIR_new_reg_op(vm->ctx, expr))));
 
       MIR_append_insn(vm->ctx, vm->function,
                       MIR_new_call_insn(
@@ -3377,7 +3418,7 @@ static void generate_string_cast(CyVM* vm, MIR_reg_t dest, MIR_reg_t expr, MIR_r
     }
     else
     {
-      Function* function = generate_string_object_cast_function(vm, data_type);
+      Function* function = generate_string_object_cast_function(vm, token, data_type);
       MIR_append_insn(
         vm->ctx, vm->function,
         MIR_new_call_insn(vm->ctx, 7, MIR_new_ref_op(vm->ctx, function->proto),
@@ -3478,7 +3519,8 @@ static void generate_cast_expression(CyVM* vm, MIR_reg_t dest, CastExpr* express
         generate_default_initialization(vm, dest, DATA_TYPE(TYPE_STRING));
       }
 
-      generate_string_cast(vm, dest, expr, depth, list, expression->from_data_type);
+      generate_string_cast(vm, expression->type.token, dest, expr, depth, list,
+                           expression->from_data_type);
       return;
     }
     case TYPE_ANY: {
@@ -3779,7 +3821,7 @@ static void generate_variable_expression(CyVM* vm, MIR_reg_t dest, VarExpr* expr
     MIR_reg_t ptr = MIR_reg(vm->ctx, "this.0", vm->function->u.func);
     MIR_append_insn(
       vm->ctx, vm->function,
-      generate_debug_info(expression->name,
+      generate_debug_info(vm, expression->name,
                           MIR_new_insn(vm->ctx, data_type_to_mov_type(expression->data_type),
                                        MIR_new_reg_op(vm->ctx, dest),
                                        generate_object_field_op(vm, expression->variable, ptr))));
@@ -3849,7 +3891,7 @@ static void generate_assignment_expression(CyVM* vm, MIR_reg_t dest, AssignExpr*
 
       MIR_append_insn(
         vm->ctx, vm->function,
-        generate_debug_info(expression->op,
+        generate_debug_info(vm, expression->op,
                             MIR_new_insn(vm->ctx, data_type_to_mov_type(expression->data_type),
                                          generate_object_field_op(vm, expression->variable, ptr),
                                          MIR_new_reg_op(vm->ctx, value))));
@@ -3887,17 +3929,21 @@ static void generate_assignment_expression(CyVM* vm, MIR_reg_t dest, AssignExpr*
       if (expression->function->data_type.type == TYPE_VOID)
         MIR_append_insn(
           vm->ctx, vm->function,
-          MIR_new_call_insn(vm->ctx, 5, MIR_new_ref_op(vm->ctx, expression->function->proto),
-                            MIR_new_ref_op(vm->ctx, expression->function->item),
-                            MIR_new_reg_op(vm->ctx, ptr), MIR_new_reg_op(vm->ctx, index),
-                            MIR_new_reg_op(vm->ctx, value)));
+          generate_debug_info(
+            vm, expression->op,
+            MIR_new_call_insn(vm->ctx, 5, MIR_new_ref_op(vm->ctx, expression->function->proto),
+                              MIR_new_ref_op(vm->ctx, expression->function->item),
+                              MIR_new_reg_op(vm->ctx, ptr), MIR_new_reg_op(vm->ctx, index),
+                              MIR_new_reg_op(vm->ctx, value))));
       else
         MIR_append_insn(
           vm->ctx, vm->function,
-          MIR_new_call_insn(vm->ctx, 6, MIR_new_ref_op(vm->ctx, expression->function->proto),
-                            MIR_new_ref_op(vm->ctx, expression->function->item),
-                            MIR_new_reg_op(vm->ctx, dest), MIR_new_reg_op(vm->ctx, ptr),
-                            MIR_new_reg_op(vm->ctx, index), MIR_new_reg_op(vm->ctx, value)));
+          generate_debug_info(
+            vm, expression->op,
+            MIR_new_call_insn(vm->ctx, 6, MIR_new_ref_op(vm->ctx, expression->function->proto),
+                              MIR_new_ref_op(vm->ctx, expression->function->item),
+                              MIR_new_reg_op(vm->ctx, dest), MIR_new_reg_op(vm->ctx, ptr),
+                              MIR_new_reg_op(vm->ctx, index), MIR_new_reg_op(vm->ctx, value))));
     }
     else
     {
@@ -3910,7 +3956,7 @@ static void generate_assignment_expression(CyVM* vm, MIR_reg_t dest, AssignExpr*
 
       MIR_append_insn(
         vm->ctx, vm->function,
-        generate_debug_info(expression->op,
+        generate_debug_info(vm, expression->op,
                             MIR_new_insn(vm->ctx, MIR_MOV, MIR_new_reg_op(vm->ctx, array_ptr),
                                          generate_array_data_op(vm, ptr))));
 
@@ -3999,7 +4045,7 @@ static void generate_call_expression(CyVM* vm, MIR_reg_t dest, CallExpr* express
 
   MIR_append_insn(
     vm->ctx, vm->function,
-    generate_debug_info(expression->callee_token,
+    generate_debug_info(vm, expression->callee_token,
                         MIR_new_insn_arr(vm->ctx, MIR_CALL, arguments.size, arguments.elems)));
 }
 
@@ -4056,7 +4102,7 @@ static void generate_access_expression(CyVM* vm, MIR_reg_t dest, AccessExpr* exp
   {
     MIR_append_insn(
       vm->ctx, vm->function,
-      generate_debug_info(expression->name,
+      generate_debug_info(vm, expression->name,
                           MIR_new_insn(vm->ctx, data_type_to_mov_type(expression->data_type),
                                        MIR_new_reg_op(vm->ctx, dest),
                                        generate_object_field_op(vm, expression->variable, ptr))));
@@ -4096,7 +4142,7 @@ static void generate_index_expression(CyVM* vm, MIR_reg_t dest, IndexExpr* expre
 
     MIR_append_insn(
       vm->ctx, vm->function,
-      generate_debug_info(expression->index_token,
+      generate_debug_info(vm, expression->index_token,
                           MIR_new_insn(vm->ctx, data_type_to_mov_type(expression->data_type),
                                        MIR_new_reg_op(vm->ctx, dest),
                                        generate_string_at_op(vm, ptr, index))));
@@ -4112,7 +4158,7 @@ static void generate_index_expression(CyVM* vm, MIR_reg_t dest, IndexExpr* expre
 
     MIR_append_insn(
       vm->ctx, vm->function,
-      generate_debug_info(expression->index_token,
+      generate_debug_info(vm, expression->index_token,
                           MIR_new_insn(vm->ctx, MIR_MOV, MIR_new_reg_op(vm->ctx, array_ptr),
                                        generate_array_data_op(vm, ptr))));
 
@@ -4121,7 +4167,7 @@ static void generate_index_expression(CyVM* vm, MIR_reg_t dest, IndexExpr* expre
     MIR_append_insn(
       vm->ctx, vm->function,
       generate_debug_info(
-        expression->index_token,
+        vm, expression->index_token,
         MIR_new_insn(vm->ctx, data_type_to_mov_type(element_data_type),
                      MIR_new_reg_op(vm->ctx, dest),
                      MIR_new_mem_op(vm->ctx, data_type_to_sized_mir_type(element_data_type), 0,
@@ -4133,16 +4179,20 @@ static void generate_index_expression(CyVM* vm, MIR_reg_t dest, IndexExpr* expre
     if (expression->function->data_type.type == TYPE_VOID)
       MIR_append_insn(
         vm->ctx, vm->function,
-        MIR_new_call_insn(vm->ctx, 4, MIR_new_ref_op(vm->ctx, expression->function->proto),
-                          MIR_new_ref_op(vm->ctx, expression->function->item),
-                          MIR_new_reg_op(vm->ctx, ptr), MIR_new_reg_op(vm->ctx, index)));
+        generate_debug_info(
+          vm, expression->index_token,
+          MIR_new_call_insn(vm->ctx, 4, MIR_new_ref_op(vm->ctx, expression->function->proto),
+                            MIR_new_ref_op(vm->ctx, expression->function->item),
+                            MIR_new_reg_op(vm->ctx, ptr), MIR_new_reg_op(vm->ctx, index))));
     else
-      MIR_append_insn(vm->ctx, vm->function,
-                      MIR_new_call_insn(vm->ctx, 5,
-                                        MIR_new_ref_op(vm->ctx, expression->function->proto),
-                                        MIR_new_ref_op(vm->ctx, expression->function->item),
-                                        MIR_new_reg_op(vm->ctx, dest), MIR_new_reg_op(vm->ctx, ptr),
-                                        MIR_new_reg_op(vm->ctx, index)));
+      MIR_append_insn(
+        vm->ctx, vm->function,
+        generate_debug_info(
+          vm, expression->index_token,
+          MIR_new_call_insn(vm->ctx, 5, MIR_new_ref_op(vm->ctx, expression->function->proto),
+                            MIR_new_ref_op(vm->ctx, expression->function->item),
+                            MIR_new_reg_op(vm->ctx, dest), MIR_new_reg_op(vm->ctx, ptr),
+                            MIR_new_reg_op(vm->ctx, index))));
 
     return;
   }
@@ -4567,7 +4617,7 @@ static void generate_class_declaration(CyVM* vm, ClassStmt* statement)
 
         MIR_append_insn(
           vm->ctx, vm->function,
-          generate_debug_info(variable->name,
+          generate_debug_info(vm, variable->name,
                               MIR_new_insn(vm->ctx, data_type_to_mov_type(variable->data_type),
                                            generate_object_field_op(vm, variable, ptr),
                                            MIR_new_reg_op(vm->ctx, initializer))));
@@ -4593,7 +4643,7 @@ static void generate_class_declaration(CyVM* vm, ClassStmt* statement)
 
       MIR_append_insn(vm->ctx, vm->function,
                       generate_debug_info(
-                        initializer_function->name,
+                        vm, initializer_function->name,
                         MIR_new_insn_arr(vm->ctx, MIR_INLINE, arguments.size, arguments.elems)));
     }
 
@@ -4975,7 +5025,7 @@ CyVM* cyth_init(void)
   vm->string_char_cast.func = MIR_new_import(vm->ctx, "string.char_cast");
 
   map_init_function(&vm->functions, 0, 0);
-  map_init_mir_item(&vm->string_constants, 0, 0);
+  map_init_strbuf_mir_item(&vm->string_constants, 0, 0);
   map_init_mir_item(&vm->items, 0, 0);
   map_init_s64(&vm->typeids, 0, 0);
 
@@ -5060,9 +5110,9 @@ void cyth_destroy(CyVM* vm)
   free(vm);
 }
 
-void cyth_set_error_callback(CyVM* vm,
-                             void (*error_callback)(int start_line, int start_column, int end_line,
-                                                    int end_column, const char* message))
+void cyth_set_error_callback(CyVM* vm, void (*error_callback)(const char* filename, int start_line,
+                                                              int start_column, int end_line,
+                                                              int end_column, const char* message))
 {
   vm->error_callback = error_callback;
 }
@@ -5080,7 +5130,7 @@ void cyth_set_logging(CyVM* vm, int logging)
 
 int cyth_load_function(CyVM* vm, const char* signature, uintptr_t func)
 {
-  lexer_init((char*)signature, vm->error_callback);
+  lexer_init(signature, signature, vm->error_callback);
   ArrayToken tokens = lexer_scan();
 
   if (lexer_errors())
@@ -5096,9 +5146,9 @@ int cyth_load_function(CyVM* vm, const char* signature, uintptr_t func)
   return true;
 }
 
-int cyth_load_string(CyVM* vm, char* string)
+int cyth_load_string(CyVM* vm, const char* filename, const char* string)
 {
-  lexer_init(string, vm->error_callback);
+  lexer_init(filename, string, vm->error_callback);
   ArrayToken tokens = lexer_scan();
 
   if (lexer_errors())
@@ -5144,7 +5194,7 @@ int cyth_load_file(CyVM* vm, const char* filename)
     goto clean_up_file;
 
   string[size] = '\0';
-  result = cyth_load_string(vm, string);
+  result = cyth_load_string(vm, filename, string);
 
 clean_up_file:
   fclose(file);
@@ -5284,6 +5334,136 @@ static void signal_handler(int sig, siginfo_t* si, void* ctx)
 }
 #endif
 
+CySetJMP cyth_setjmp(void)
+{
+#ifdef _WIN32
+#ifdef _M_ARM64
+  static unsigned char buffer[] = {
+    0x13, 0x50, 0x00, 0xa9, //      stp x19, x20, [x0,#0]
+    0x15, 0x58, 0x01, 0xa9, //      stp x21, x22, [x0,#16]
+    0x17, 0x60, 0x02, 0xa9, //      stp x23, x24, [x0,#32]
+    0x19, 0x68, 0x03, 0xa9, //      stp x25, x26, [x0,#48]
+    0x1b, 0x70, 0x04, 0xa9, //      stp x27, x28, [x0,#64]
+    0x1d, 0x78, 0x05, 0xa9, //      stp x29, x30, [x0,#80]
+    0xe2, 0x03, 0x00, 0x91, //      mov x2, sp
+    0x02, 0x34, 0x00, 0xf9, //      str x2, [x0,#104]
+    0x08, 0x24, 0x07, 0x6d, //      stp  d8,  d9, [x0,#112]
+    0x0a, 0x2c, 0x08, 0x6d, //      stp d10, d11, [x0,#128]
+    0x0c, 0x34, 0x09, 0x6d, //      stp d12, d13, [x0,#144]
+    0x0e, 0x3c, 0x0a, 0x6d, //      stp d14, d15, [x0,#160]
+    0x00, 0x00, 0x80, 0xd2, //      mov x0, #0
+    0xc0, 0x03, 0x5f, 0xd6, //      ret
+  };
+#else
+  static unsigned char buffer[] = {
+    0x48, 0x89, 0x11,                                     // mov         qword ptr [rcx],rdx
+    0x48, 0x89, 0x59, 0x08,                               // mov         qword ptr [rcx+8],rbx
+    0x4C, 0x8D, 0x44, 0x24, 0x08,                         // lea         r8,[rsp+8]
+    0x4C, 0x89, 0x41, 0x10,                               // mov         qword ptr [rcx+10h],r8
+    0x48, 0x89, 0x69, 0x18,                               // mov         qword ptr [rcx+18h],rbp
+    0x48, 0x89, 0x71, 0x20,                               // mov         qword ptr [rcx+20h],rsi
+    0x48, 0x89, 0x79, 0x28,                               // mov         qword ptr [rcx+28h],rdi
+    0x4C, 0x89, 0x61, 0x30,                               // mov         qword ptr [rcx+30h],r12
+    0x4C, 0x89, 0x69, 0x38,                               // mov         qword ptr [rcx+38h],r13
+    0x4C, 0x89, 0x71, 0x40,                               // mov         qword ptr [rcx+40h],r14
+    0x4C, 0x89, 0x79, 0x48,                               // mov         qword ptr [rcx+48h],r15
+    0x4C, 0x8B, 0x04, 0x24,                               // mov         r8,qword ptr [rsp]
+    0x4C, 0x89, 0x41, 0x50,                               // mov         qword ptr [rcx+50h],r8
+    0x0F, 0xAE, 0x59, 0x58,                               // stmxcsr     dword ptr [rcx+58h]
+    0xD9, 0x79, 0x5C,                                     // fnstcw      word ptr [rcx+5Ch]
+    0x66, 0x0F, 0x7F, 0x71, 0x60,                         // movdqa      xmmword ptr [rcx+60h],xmm6
+    0x66, 0x0F, 0x7F, 0x79, 0x70,                         // movdqa      xmmword ptr [rcx+70h],xmm7
+    0x66, 0x44, 0x0F, 0x7F, 0x81, 0x80, 0x00, 0x00, 0x00, // movdqa      xmmword ptr [rcx+80h],xmm8
+    0x66, 0x44, 0x0F, 0x7F, 0x89, 0x90, 0x00, 0x00, 0x00, // movdqa      xmmword ptr [rcx+90h],xmm9
+    0x66, 0x44, 0x0F, 0x7F, 0x91, 0xA0, 0x00, 0x00, 0x00, // movdqa      xmmword ptr [rcx+A0h],xmm10
+    0x66, 0x44, 0x0F, 0x7F, 0x99, 0xB0, 0x00, 0x00, 0x00, // movdqa      xmmword ptr [rcx+B0h],xmm11
+    0x66, 0x44, 0x0F, 0x7F, 0xA1, 0xC0, 0x00, 0x00, 0x00, // movdqa      xmmword ptr [rcx+C0h],xmm12
+    0x66, 0x44, 0x0F, 0x7F, 0xA9, 0xD0, 0x00, 0x00, 0x00, // movdqa      xmmword ptr [rcx+D0h],xmm13
+    0x66, 0x44, 0x0F, 0x7F, 0xB1, 0xE0, 0x00, 0x00, 0x00, // movdqa      xmmword ptr [rcx+E0h],xmm14
+    0x66, 0x44, 0x0F, 0x7F, 0xB9, 0xF0, 0x00, 0x00, 0x00, // movdqa      xmmword ptr [rcx+F0h],xmm15
+    0x33, 0xC0,                                           // xor         eax,eax
+    0xC3,                                                 // ret
+  };
+#endif
+
+  static CySetJMP setjmp = NULL;
+  if (!setjmp)
+  {
+    setjmp = (CySetJMP)(uintptr_t)VirtualAlloc(NULL, sizeof(buffer), MEM_COMMIT, PAGE_READWRITE);
+    memcpy((void*)(uintptr_t)setjmp, buffer, sizeof(buffer));
+
+    DWORD old_protect;
+    VirtualProtect((void*)(uintptr_t)setjmp, sizeof(buffer), PAGE_EXECUTE_READ, &old_protect);
+  }
+#endif
+
+  return (CySetJMP)setjmp;
+}
+
+CyLongJMP cyth_longjmp(void)
+{
+#ifdef _WIN32
+#ifdef _M_ARM64
+  static unsigned char buffer[] = {
+    0x13, 0x50, 0x40, 0xa9, //      ldp x19, x20, [x0,#0]
+    0x15, 0x58, 0x41, 0xa9, //      ldp x21, x22, [x0,#16]
+    0x17, 0x60, 0x42, 0xa9, //      ldp x23, x24, [x0,#32]
+    0x19, 0x68, 0x43, 0xa9, //      ldp x25, x26, [x0,#48]
+    0x1b, 0x70, 0x44, 0xa9, //      ldp x27, x28, [x0,#64]
+    0x1d, 0x78, 0x45, 0xa9, //      ldp x29, x30, [x0,#80]
+    0x02, 0x34, 0x40, 0xf9, //      ldr x2, [x0,#104]
+    0x5f, 0x00, 0x00, 0x91, //      mov sp, x2
+    0x08, 0x24, 0x47, 0x6d, //      ldp d8 , d9, [x0,#112]
+    0x0a, 0x2c, 0x48, 0x6d, //      ldp d10, d11, [x0,#128]
+    0x0c, 0x34, 0x49, 0x6d, //      ldp d12, d13, [x0,#144]
+    0x0e, 0x3c, 0x4a, 0x6d, //      ldp d14, d15, [x0,#160]
+    0xe0, 0x03, 0x01, 0xaa, //      mov x0, x1
+    0x21, 0x00, 0x00, 0xb5, //      cbnz x1, ret
+    0x20, 0x00, 0x80, 0xd2, // ret: mov x0, #1
+    0xc0, 0x03, 0x1f, 0xd6, //      br x30
+  };
+#else
+  static unsigned char buffer[] = {
+    0x8B, 0xC2,                                           // mov         eax,edx
+    0x48, 0x8B, 0x11,                                     // mov         rdx,qword ptr [rcx]
+    0x48, 0x8B, 0x59, 0x08,                               // mov         rbx,qword ptr [rcx+8]
+    0x48, 0x8B, 0x61, 0x10,                               // mov         rsp,qword ptr [rcx+10h]
+    0x48, 0x8B, 0x69, 0x18,                               // mov         rbp,qword ptr [rcx+18h]
+    0x48, 0x8B, 0x71, 0x20,                               // mov         rsi,qword ptr [rcx+20h]
+    0x48, 0x8B, 0x79, 0x28,                               // mov         rdi,qword ptr [rcx+28h]
+    0x4C, 0x8B, 0x61, 0x30,                               // mov         r12,qword ptr [rcx+30h]
+    0x4C, 0x8B, 0x69, 0x38,                               // mov         r13,qword ptr [rcx+38h]
+    0x4C, 0x8B, 0x71, 0x40,                               // mov         r14,qword ptr [rcx+40h]
+    0x4C, 0x8B, 0x79, 0x48,                               // mov         r15,qword ptr [rcx+48h]
+    0x4C, 0x8B, 0x41, 0x50,                               // mov         r8,qword ptr [rcx+50h]
+    0x66, 0x0F, 0x6F, 0x71, 0x60,                         // movdqa      xmm6,xmmword ptr [rcx+60h]
+    0x66, 0x0F, 0x6F, 0x79, 0x70,                         // movdqa      xmm7,xmmword ptr [rcx+70h]
+    0x66, 0x44, 0x0F, 0x6F, 0x81, 0x80, 0x00, 0x00, 0x00, // movdqa      xmm8,xmmword ptr [rcx+80h]
+    0x66, 0x44, 0x0F, 0x6F, 0x89, 0x90, 0x00, 0x00, 0x00, // movdqa      xmm9,xmmword ptr [rcx+90h]
+    0x66, 0x44, 0x0F, 0x6F, 0x91, 0xA0, 0x00, 0x00, 0x00, // movdqa      xmm10,xmmword ptr [rcx+A0h]
+    0x66, 0x44, 0x0F, 0x6F, 0x99, 0xB0, 0x00, 0x00, 0x00, // movdqa      xmm11,xmmword ptr [rcx+B0h]
+    0x66, 0x44, 0x0F, 0x6F, 0xA1, 0xC0, 0x00, 0x00, 0x00, // movdqa      xmm12,xmmword ptr [rcx+C0h]
+    0x66, 0x44, 0x0F, 0x6F, 0xA9, 0xD0, 0x00, 0x00, 0x00, // movdqa      xmm13,xmmword ptr [rcx+D0h]
+    0x66, 0x44, 0x0F, 0x6F, 0xB1, 0xE0, 0x00, 0x00, 0x00, // movdqa      xmm14,xmmword ptr [rcx+E0h]
+    0x66, 0x44, 0x0F, 0x6F, 0xB9, 0xF0, 0x00, 0x00, 0x00, // movdqa      xmm15,xmmword ptr [rcx+F0h]
+    0x41, 0xFF, 0xE0,                                     // jmp         r8
+  };
+#endif
+
+  static CyLongJMP longjmp = NULL;
+  if (!longjmp)
+  {
+    longjmp = (CyLongJMP)(uintptr_t)VirtualAlloc(NULL, sizeof(buffer), MEM_COMMIT, PAGE_READWRITE);
+    memcpy((void*)(uintptr_t)longjmp, buffer, sizeof(buffer));
+
+    DWORD old_protect;
+    VirtualProtect((void*)(uintptr_t)longjmp, sizeof(buffer), PAGE_EXECUTE_READ, &old_protect);
+  }
+#endif
+
+  return (CyLongJMP)longjmp;
+}
+
 void* cyth_push_jmp(CyVM* vm, void* new)
 {
   jmp_buf* old = vm->jmp;
@@ -5309,7 +5489,7 @@ void* cyth_push_jmp(CyVM* vm, void* new)
     sa.sa_sigaction = signal_handler;
     sigaction(SIGFPE, &sa, NULL);
 #else
-    ULONG size = 1024 * 1024;
+    ULONG size = 64 * 1024;
     SetThreadStackGuarantee(&size);
 
     handler = AddVectoredExceptionHandler(1, vector_handler);
