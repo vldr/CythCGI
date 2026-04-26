@@ -11,7 +11,7 @@ use std::{
     io::{Read, Write},
     net::TcpListener,
     process::ExitCode,
-    ptr,
+    ptr::{self, null},
     rc::Rc,
     slice,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -30,7 +30,40 @@ struct Script {
     modified: SystemTime,
     text: Rc<Vec<String>>,
     mapping: Rc<Vec<(i32, i32)>>,
+    functions: Functions,
     vm: *const c_void,
+}
+
+#[derive(Default)]
+struct Context {
+    input: String,
+    output: String,
+    headers: String,
+    text: Rc<Vec<String>>,
+    environs: Rc<HashMap<String, String>>,
+    connections: Vec<ConnectionThreadSafe>,
+    statements: Vec<Statement>,
+    mapping: Rc<Vec<(i32, i32)>>,
+    path: String,
+    functions: Functions,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct Functions {
+    json_number: unsafe extern "C" fn(number: f32) -> *const c_void,
+    json_bool: unsafe extern "C" fn(bool: c_int) -> *const c_void,
+    json_string: unsafe extern "C" fn(string: *const CyString) -> *const c_void,
+    json_array: unsafe extern "C" fn(array: *const CyArray<*const c_void>) -> *const c_void,
+    json_object: unsafe extern "C" fn(map: *const c_void) -> *const c_void,
+    map_init: unsafe extern "C" fn(this: *const c_void) -> *const c_void,
+    map_set: unsafe extern "C" fn(this: *const c_void, key: *const CyString, value: *const c_void),
+}
+
+impl Default for Functions {
+    fn default() -> Self {
+        unsafe { std::mem::transmute::<[usize; 7], Functions>([0; 7]) }
+    }
 }
 
 #[repr(C)]
@@ -57,6 +90,7 @@ unsafe extern "C" {
     ) -> c_int;
     fn cyth_load_string(vm: *const c_void, filename: *const c_char, source: *const c_char)
     -> c_int;
+    fn cyth_get_function(vm: *const c_void, name: *const c_char) -> *const c_void;
     fn cyth_compile(vm: *const c_void) -> c_int;
     fn cyth_run(vm: *const c_void);
     fn cyth_destroy(vm: *const c_void);
@@ -87,7 +121,7 @@ fn cyth_new_string(string: &str) -> *mut CyString {
     }
 }
 
-fn cyth_new_array<T: Copy>(list: Vec<T>) -> *mut CyArray<T> {
+fn cyth_new_array<T: Copy>(list: impl ExactSizeIterator<Item = T>) -> *const CyArray<T> {
     unsafe {
         let data_size = list.len();
         let data_atomic = !std::any::type_name::<T>().starts_with("*") as i32;
@@ -97,8 +131,8 @@ fn cyth_new_array<T: Copy>(list: Vec<T>) -> *mut CyArray<T> {
             std::alloc::handle_alloc_error(data_layout);
         }
 
-        for (index, item) in list.iter().enumerate() {
-            ptr::write(data_ptr.add(index), *item);
+        for (index, item) in list.enumerate() {
+            ptr::write(data_ptr.add(index), item);
         }
 
         let cyth_array_layout = Layout::new::<CyArray<*mut T>>();
@@ -112,6 +146,35 @@ fn cyth_new_array<T: Copy>(list: Vec<T>) -> *mut CyArray<T> {
         (*cyth_array).data = data_ptr;
 
         cyth_array
+    }
+}
+
+unsafe extern "C" fn cyth_new_json(value: &serde_json::Value) -> *const c_void {
+    let context = unsafe { &mut *CONTEXT };
+
+    match value {
+        serde_json::Value::Null => null(),
+        serde_json::Value::Bool(value) => unsafe { (context.functions.json_bool)(*value as i32) },
+        serde_json::Value::Number(value) => unsafe {
+            (context.functions.json_number)(value.as_f64().unwrap() as f32)
+        },
+        serde_json::Value::String(value) => unsafe {
+            (context.functions.json_string)(cyth_new_string(value))
+        },
+        serde_json::Value::Array(values) => unsafe {
+            (context.functions.json_array)(cyth_new_array(
+                values.iter().map(|value| cyth_new_json(value)),
+            ))
+        },
+        serde_json::Value::Object(map) => unsafe {
+            let this = (context.functions.map_init)(null());
+
+            for (key, value) in map {
+                (context.functions.map_set)(this, cyth_new_string(key), cyth_new_json(value));
+            }
+
+            (context.functions.json_object)(this)
+        },
     }
 }
 
@@ -140,13 +203,25 @@ extern "C" fn error_callback(
     let filename = unsafe { CStr::from_ptr(filename).to_str().unwrap_or("") };
 
     if filename == context.path {
+        let (mapped_start_line, mapped_start_column) = context
+            .mapping
+            .get((start_line - 1) as usize)
+            .copied()
+            .unwrap_or((start_line, 0));
+
+        let (mapped_end_line, mapped_end_column) = context
+            .mapping
+            .get((end_line - 1) as usize)
+            .copied()
+            .unwrap_or((end_line, 0));
+
         context.output.push_str(&format!(
             "{}:{}:{}-{}:{}: {}\n",
             filename,
-            context.mapping[(start_line - 1) as usize].0,
-            context.mapping[(start_line - 1) as usize].1 + start_column,
-            context.mapping[(end_line - 1) as usize].0,
-            context.mapping[(end_line - 1) as usize].1 + end_column,
+            mapped_start_line,
+            mapped_start_column + start_column,
+            mapped_end_line,
+            mapped_end_column + end_column,
             message
         ));
     } else {
@@ -161,45 +236,38 @@ extern "C" fn panic_callback(function: *const c_char, line: c_int, column: c_int
     let context = unsafe { &mut *CONTEXT };
 
     if line == 0 && column == 0 {
+        context.headers.clear();
         context
             .headers
             .push_str("Status: 500 Internal Server Error\n");
         context.headers.push_str("Content-Type: text/plain\n");
 
-        context.output.clear();
         context.output.push_str(&format!("{}\n", unsafe {
             CStr::from_ptr(function).to_str().unwrap()
         }));
     } else {
+        let (mapped_line, mapped_column) = context
+            .mapping
+            .get((line - 1) as usize)
+            .copied()
+            .unwrap_or((line, 0));
+
         context.output.push_str(&format!(
             "  at {}:{}:{}\n",
             unsafe { CStr::from_ptr(function).to_str().unwrap() },
-            context.mapping[(line - 1) as usize].0,
-            context.mapping[(line - 1) as usize].1 + column,
+            mapped_line,
+            mapped_column + column,
         ));
     }
 }
 
-#[derive(Default)]
-struct Context {
-    input: String,
-    output: String,
-    headers: String,
-    text: Rc<Vec<String>>,
-    environs: Rc<HashMap<String, String>>,
-    connections: Vec<ConnectionThreadSafe>,
-    statements: Vec<Statement>,
-    mapping: Rc<Vec<(i32, i32)>>,
-    path: String,
-}
-
-const BUILTINS: &str = "
+const BUILTINS: &str = r#"
 Map<string, string> parseQuery(string query)
     Map<string, string> result = Map<string, string>()
 
-    string[] pairs = query.split(\"&\")
+    string[] pairs = query.split("&")
     for string pair in pairs
-        string[] parts = pair.split(\"=\")
+        string[] parts = pair.split("=")
 
         if parts.length == 2
             result.insert(parts[0], urlDecode(parts[1]))
@@ -300,120 +368,257 @@ class Statement
     bool next()
         return sqliteNext(stmt)
 
-class Entry<K, V>
-    K key
-    V value
-    Entry<K, V> next
+class JsonNumber
+    float value
 
-    void __init__(K key, V value, Entry<K, V> next)
-        this.key = key
+    void __init__(float value)
         this.value = value
-        this.next = next
+
+any jsonNumber(float value)
+    return JsonNumber(value)
+
+class JsonString
+    string value
+
+    void __init__(string value)
+        this.value = value
+
+any jsonString(string value)
+    return JsonString(value)
+
+class JsonBool
+    bool value
+
+    void __init__(bool value)
+        this.value = value
+
+any jsonBool(bool value)
+    return JsonBool(value)
+
+class JsonArray
+    any[] value
+
+    void __init__(any[] value)
+        this.value = value
+
+    any __get__(int index)
+        return this.value[index]
+
+    int length()
+        return this.value.length
+
+any jsonArray(any[] value)
+    return JsonArray(value)
+
+class JsonObject
+    Map<string, any> value
+
+    void __init__(Map<string, any> value)
+        this.value = value
+
+    void __set__(string key, any val)
+        this.value[key] = val
+
+    any __get__(string key)
+        return this.value[key]
+
+any jsonObject(Map<string, any> value)
+    return JsonObject(value)
+
+void jsonEncodeString(char[] buffer, string value)
+    buffer.push('"')
+
+    for char c in value
+        if c == '"'
+            buffer.push('\\')
+            buffer.push('"')
+        else if c == '\\'
+            buffer.push('\\')
+            buffer.push('\\')
+        else if c == '\n'
+            buffer.push('\\')
+            buffer.push('n')
+        else if c == '\r'
+            buffer.push('\\')
+            buffer.push('r')
+        else if c == '\t'
+            buffer.push('\\')
+            buffer.push('t')
+        else
+            buffer.push(c)
+
+    buffer.push('"')
+
+string jsonEncode(any value)
+    char[] buffer
+    jsonEncode(buffer, value)
+
+    return buffer.toString()
+
+void jsonEncode(char[] buffer, any value)
+    if value is JsonBool
+        JsonBool b = (JsonBool)value
+
+        if b.value
+            buffer.pushString("true")
+        else
+            buffer.pushString("false")
+
+    else if value is JsonNumber
+        JsonNumber n = (JsonNumber)value
+        buffer.pushString((string)n.value)
+
+    else if value is JsonString
+        JsonString s = (JsonString)value
+        jsonEncodeString(buffer, s.value)
+
+    else if value is JsonArray
+        JsonArray a = (JsonArray)value
+        buffer.push('[')
+
+        for any value in a.value
+            if it > 0
+                buffer.push(',')
+            
+            jsonEncode(buffer, value)
+
+        buffer.push(']')
+    
+    else if value is JsonObject
+        JsonObject o = (JsonObject)value
+        buffer.push('{')
+        bool first = true
+
+        for bool used in o.value.used
+            if not used
+                continue
+
+            if not first
+                buffer.push(',')
+
+            jsonEncodeString(buffer, o.value.keys[it])
+            buffer.push(':')
+            jsonEncode(buffer, o.value.values[it])
+
+            first = false
+
+        buffer.push('}')
+    else
+        buffer.pushString("null")
 
 class Map<K, V>
-    Entry<K, V>[] buckets
+    K[] keys
+    V[] values
+    bool[] used
     int bucketCount
     int size
 
     void __init__()
-        bucketCount = 64
+        bucketCount = 32
         size = 0
 
-        for int i = 0; i < bucketCount; i += 1
-            buckets.push(null)
-
+        keys.reserve(bucketCount)
+        values.reserve(bucketCount)
+        used.reserve(bucketCount)
+    
     void __set__(K key, V value)
-        insert(key, value)
+        insertAndResize(key, value)
 
     V __get__(K key)
         return get(key)
 
     int hash(K key)
-        int hash = key.hash() % buckets.length
+        int h = key.hash() % bucketCount
+        if h < 0
+            h *= -1
+        return h
 
-        if hash < 0
-            hash = hash * -1
-        
-        return hash
+    void resize()
+        K[] oldKeys = keys
+        V[] oldValues = values
+        bool[] oldUsed = used
+        int oldCount = bucketCount
+
+        bucketCount = bucketCount * 2
+        size = 0
+        keys.reserve(bucketCount)
+        values.reserve(bucketCount)
+        used.reserve(bucketCount)
+
+        for int i = 0; i < oldCount; i += 1
+            if oldUsed[i]
+                insert(oldKeys[i], oldValues[i])
 
     void insert(K key, V value)
-        void resize()
-            Entry<K, V>[] oldBuckets = buckets
-            bucketCount = bucketCount * 2
-            size = 0
-
-            for int i = 0; i < bucketCount; i += 1
-                buckets.push(null)
-
-            for int i = 0; i < oldBuckets.length; i += 1
-                Entry<K, V> current = oldBuckets[i]
-                while current != null
-                    Entry<K, V> nextEntry = current.next
-                    insert(current.key, current.value)
-                    current = nextEntry
-
         int index = hash(key)
-        Entry<K, V> head = buckets[index]
-        Entry<K, V> current = head
 
-        while current != null
-            if current.key == key
-                current.value = value
+        while used[index]
+            if keys[index] == key
+                values[index] = value
                 return
-            
-            current = current.next
-    
-        Entry<K, V> newEntry = Entry<K, V>(key, value, head)
-        buckets[index] = newEntry
-        size = size + 1
-    
+            index = (index + 1) % bucketCount
+
+        keys[index] = key
+        values[index] = value
+        used[index] = true
+        size += 1
+
+    void insertAndResize(K key, V value)
+        insert(key, value)
         float threshold = 0.75
         if size > bucketCount * threshold
             resize()
 
     bool contains(K key)
         int index = hash(key)
-        Entry<K, V> current = buckets[index]
+        int start = index
 
-        while current != null
-            if current.key == key
+        while used[index]
+            if keys[index] == key
                 return true
-
-            current = current.next
+            index = (index + 1) % bucketCount
+            if index == start
+                return false
 
         return false
 
     V get(K key)
         int index = hash(key)
-        Entry<K, V> current = buckets[index]
+        int start = index
 
-        while current != null
-            if current.key == key
-                return current.value
+        while used[index]
+            if keys[index] == key
+                return values[index]
+            index = (index + 1) % bucketCount
+            if index == start
+                break
 
-            current = current.next
-    
-        current = null
-        return current.value
+        return V()
 
     void remove(K key)
         int index = hash(key)
-        Entry<K, V> current = buckets[index]
-        Entry<K, V> prev = null
+        int start = index
 
-        while current != null
-            if current.key == key
-                if prev == null
-                    buckets[index] = current.next
-                else
-                    prev.next = current.next
-                
-                size = size - 1
+        while used[index]
+            if keys[index] == key
+                used[index] = false
+                size -= 1
+
+                int next = (index + 1) % bucketCount
+                while used[next]
+                    K rehashKey = keys[next]
+                    V rehashValue = values[next]
+                    used[next] = false
+                    size -= 1
+                    insert(rehashKey, rehashValue)
+                    next = (next + 1) % bucketCount
+
                 return
-        
-            prev = current
-            current = current.next
-";
+
+            index = (index + 1) % bucketCount
+            if index == start
+                return
+"#;
 
 static mut CONTEXT: *mut Context = ptr::null_mut();
 
@@ -531,6 +736,7 @@ fn run_script(req: &mut Request, context: &mut Context, script: &Script) {
     let instant = Instant::now();
     context.text = script.text.clone();
     context.mapping = script.mapping.clone();
+    context.functions = script.functions;
     context.environs = req.params();
     context.headers.clear();
     context.output.clear();
@@ -565,11 +771,7 @@ fn compile_script(vm: *const c_void) -> c_int {
             let context = unsafe { &mut *CONTEXT };
             context.output.push_str(cyth_string_to_str(input));
         }
-        cyth_load_function(
-            vm,
-            CString::new("void print(string n)").unwrap().as_ptr(),
-            print as *const c_void,
-        );
+        cyth_load_function(vm, c"void print(string n)".as_ptr(), print as *const c_void);
 
         unsafe extern "C" fn println(input: *const CyString) {
             let context = unsafe { &mut *CONTEXT };
@@ -578,7 +780,7 @@ fn compile_script(vm: *const c_void) -> c_int {
         }
         cyth_load_function(
             vm,
-            CString::new("void println(string n)").unwrap().as_ptr(),
+            c"void println(string n)".as_ptr(),
             println as *const c_void,
         );
 
@@ -586,12 +788,12 @@ fn compile_script(vm: *const c_void) -> c_int {
             let context = unsafe { &mut *CONTEXT };
 
             if let Some(text) = context.text.get(n as usize) {
-                context.output.write_str(&text).unwrap();
+                context.output.write_str(text).unwrap();
             }
         }
         cyth_load_function(
             vm,
-            CString::new("void printInternal(int n)").unwrap().as_ptr(),
+            c"void printInternal(int n)".as_ptr(),
             print_internal as *const c_void,
         );
 
@@ -603,7 +805,7 @@ fn compile_script(vm: *const c_void) -> c_int {
         }
         cyth_load_function(
             vm,
-            CString::new("string urlEncode(string n)").unwrap().as_ptr(),
+            c"string urlEncode(string n)".as_ptr(),
             url_encode as *const c_void,
         );
 
@@ -619,7 +821,7 @@ fn compile_script(vm: *const c_void) -> c_int {
         }
         cyth_load_function(
             vm,
-            CString::new("string urlDecode(string n)").unwrap().as_ptr(),
+            c"string urlDecode(string n)".as_ptr(),
             url_decode as *const c_void,
         );
 
@@ -641,7 +843,7 @@ fn compile_script(vm: *const c_void) -> c_int {
         }
         cyth_load_function(
             vm,
-            CString::new("string markdown(string n)").unwrap().as_ptr(),
+            c"string markdown(string n)".as_ptr(),
             markdown as *const c_void,
         );
 
@@ -650,11 +852,7 @@ fn compile_script(vm: *const c_void) -> c_int {
             let output = bcrypt::hash(input, DEFAULT_COST).unwrap();
             cyth_new_string(&output)
         }
-        cyth_load_function(
-            vm,
-            CString::new("string hash(string n)").unwrap().as_ptr(),
-            hash as *const c_void,
-        );
+        cyth_load_function(vm, c"string hash(string n)".as_ptr(), hash as *const c_void);
 
         unsafe extern "C" fn verify(password: *const CyString, hash: *const CyString) -> c_int {
             let password = cyth_string_to_str(password);
@@ -665,9 +863,7 @@ fn compile_script(vm: *const c_void) -> c_int {
         }
         cyth_load_function(
             vm,
-            CString::new("bool verify(string n, string m)")
-                .unwrap()
-                .as_ptr(),
+            c"bool verify(string n, string m)".as_ptr(),
             verify as *const c_void,
         );
 
@@ -676,11 +872,7 @@ fn compile_script(vm: *const c_void) -> c_int {
 
             cyth_new_string(&context.input)
         }
-        cyth_load_function(
-            vm,
-            CString::new("string body()").unwrap().as_ptr(),
-            body as *const c_void,
-        );
+        cyth_load_function(vm, c"string body()".as_ptr(), body as *const c_void);
 
         unsafe extern "C" fn query() -> *const CyString {
             let context = unsafe { &mut *CONTEXT };
@@ -689,11 +881,7 @@ fn compile_script(vm: *const c_void) -> c_int {
 
             cyth_new_string(query)
         }
-        cyth_load_function(
-            vm,
-            CString::new("string query()").unwrap().as_ptr(),
-            query as *const c_void,
-        );
+        cyth_load_function(vm, c"string query()".as_ptr(), query as *const c_void);
 
         unsafe extern "C" fn header(input: *const CyString) {
             let context = unsafe { &mut *CONTEXT };
@@ -704,7 +892,7 @@ fn compile_script(vm: *const c_void) -> c_int {
         }
         cyth_load_function(
             vm,
-            CString::new("void header(string n)").unwrap().as_ptr(),
+            c"void header(string n)".as_ptr(),
             header as *const c_void,
         );
 
@@ -734,7 +922,7 @@ fn compile_script(vm: *const c_void) -> c_int {
         }
         cyth_load_function(
             vm,
-            CString::new("string cookie(string n)").unwrap().as_ptr(),
+            c"string cookie(string n)".as_ptr(),
             cookie as *const c_void,
         );
 
@@ -742,11 +930,7 @@ fn compile_script(vm: *const c_void) -> c_int {
             let uuid = Uuid::new_v4();
             cyth_new_string(&uuid.as_hyphenated().to_string())
         }
-        cyth_load_function(
-            vm,
-            CString::new("string uuid()").unwrap().as_ptr(),
-            uuid as *const c_void,
-        );
+        cyth_load_function(vm, c"string uuid()".as_ptr(), uuid as *const c_void);
 
         unsafe extern "C" fn get_environ(key: *const CyString) -> *const CyString {
             let context = unsafe { &mut *CONTEXT };
@@ -759,26 +943,23 @@ fn compile_script(vm: *const c_void) -> c_int {
         }
         cyth_load_function(
             vm,
-            CString::new("string getEnviron(string n)")
-                .unwrap()
-                .as_ptr(),
+            c"string getEnviron(string n)".as_ptr(),
             get_environ as *const c_void,
         );
 
-        unsafe extern "C" fn get_environs() -> *mut CyArray<*mut CyString> {
+        unsafe extern "C" fn get_environs() -> *const CyArray<*mut CyString> {
             let context = unsafe { &mut *CONTEXT };
 
             cyth_new_array(
                 context
                     .environs
                     .keys()
-                    .map(|key| cyth_new_string(key.as_str()))
-                    .collect(),
+                    .map(|key| cyth_new_string(key.as_str())),
             )
         }
         cyth_load_function(
             vm,
-            CString::new("string[] getEnvirons()").unwrap().as_ptr(),
+            c"string[] getEnvirons()".as_ptr(),
             get_environs as *const c_void,
         );
 
@@ -791,9 +972,7 @@ fn compile_script(vm: *const c_void) -> c_int {
         }
         cyth_load_function(
             vm,
-            CString::new("string date(int n, string m)")
-                .unwrap()
-                .as_ptr(),
+            c"string date(int n, string m)".as_ptr(),
             date as *const c_void,
         );
 
@@ -803,10 +982,37 @@ fn compile_script(vm: *const c_void) -> c_int {
                 .unwrap()
                 .as_secs() as i32
         }
+        cyth_load_function(vm, c"int now()".as_ptr(), now as *const c_void);
+
+        unsafe extern "C" fn fetch(uri: *const CyString) -> *const CyString {
+            let uri = cyth_string_to_str(uri);
+
+            if let Ok(mut request) = ureq::get(uri).call() {
+                let body = request.body_mut().read_to_string().unwrap_or_default();
+
+                cyth_new_string(&body)
+            } else {
+                cyth_new_string("")
+            }
+        }
         cyth_load_function(
             vm,
-            CString::new("int now()").unwrap().as_ptr(),
-            now as *const c_void,
+            c"string fetch(string n)".as_ptr(),
+            fetch as *const c_void,
+        );
+
+        unsafe extern "C" fn json_decode(json: *const CyString) -> *const c_void {
+            let json = cyth_string_to_str(json);
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(json) {
+                return unsafe { cyth_new_json(&value) };
+            }
+
+            null()
+        }
+        cyth_load_function(
+            vm,
+            c"any jsonDecode(string n)".as_ptr(),
+            json_decode as *const c_void,
         );
 
         unsafe extern "C" fn sqlite_open(path: *const CyString) -> c_int {
@@ -828,7 +1034,7 @@ fn compile_script(vm: *const c_void) -> c_int {
         }
         cyth_load_function(
             vm,
-            CString::new("int sqliteOpen(string n)").unwrap().as_ptr(),
+            c"int sqliteOpen(string n)".as_ptr(),
             sqlite_open as *const c_void,
         );
 
@@ -843,9 +1049,7 @@ fn compile_script(vm: *const c_void) -> c_int {
         }
         cyth_load_function(
             vm,
-            CString::new("bool sqliteExecute(int n, string m)")
-                .unwrap()
-                .as_ptr(),
+            c"bool sqliteExecute(int n, string m)".as_ptr(),
             sqlite_execute as *const c_void,
         );
 
@@ -876,9 +1080,7 @@ fn compile_script(vm: *const c_void) -> c_int {
         }
         cyth_load_function(
             vm,
-            CString::new("int sqlitePrepare(int n, string m)")
-                .unwrap()
-                .as_ptr(),
+            c"int sqlitePrepare(int n, string m)".as_ptr(),
             sqlite_prepare as *const c_void,
         );
 
@@ -892,9 +1094,7 @@ fn compile_script(vm: *const c_void) -> c_int {
         }
         cyth_load_function(
             vm,
-            CString::new("bool sqliteBind(int n, int m, int q)")
-                .unwrap()
-                .as_ptr(),
+            c"bool sqliteBind(int n, int m, int q)".as_ptr(),
             sqlite_bind_int as *const c_void,
         );
 
@@ -908,9 +1108,7 @@ fn compile_script(vm: *const c_void) -> c_int {
         }
         cyth_load_function(
             vm,
-            CString::new("bool sqliteBind(int n, int m, float q)")
-                .unwrap()
-                .as_ptr(),
+            c"bool sqliteBind(int n, int m, float q)".as_ptr(),
             sqlite_bind_float as *const c_void,
         );
 
@@ -929,9 +1127,7 @@ fn compile_script(vm: *const c_void) -> c_int {
         }
         cyth_load_function(
             vm,
-            CString::new("bool sqliteBind(int n, int m, char[] q)")
-                .unwrap()
-                .as_ptr(),
+            c"bool sqliteBind(int n, int m, char[] q)".as_ptr(),
             sqlite_bind_char as *const c_void,
         );
 
@@ -950,9 +1146,7 @@ fn compile_script(vm: *const c_void) -> c_int {
         }
         cyth_load_function(
             vm,
-            CString::new("bool sqliteBind(int n, int m, string q)")
-                .unwrap()
-                .as_ptr(),
+            c"bool sqliteBind(int n, int m, string q)".as_ptr(),
             sqlite_bind_string as *const c_void,
         );
 
@@ -968,9 +1162,7 @@ fn compile_script(vm: *const c_void) -> c_int {
         }
         cyth_load_function(
             vm,
-            CString::new("bool sqliteBindNull(int n, int m)")
-                .unwrap()
-                .as_ptr(),
+            c"bool sqliteBindNull(int n, int m)".as_ptr(),
             sqlite_bind_null as *const c_void,
         );
 
@@ -995,7 +1187,7 @@ fn compile_script(vm: *const c_void) -> c_int {
         }
         cyth_load_function(
             vm,
-            CString::new("bool sqliteNext(int n)").unwrap().as_ptr(),
+            c"bool sqliteNext(int n)".as_ptr(),
             sqlite_next as *const c_void,
         );
 
@@ -1010,9 +1202,7 @@ fn compile_script(vm: *const c_void) -> c_int {
         }
         cyth_load_function(
             vm,
-            CString::new("int sqliteReadInt(int n, string m)")
-                .unwrap()
-                .as_ptr(),
+            c"int sqliteReadInt(int n, string m)".as_ptr(),
             sqlite_read_int as *const c_void,
         );
 
@@ -1027,9 +1217,7 @@ fn compile_script(vm: *const c_void) -> c_int {
         }
         cyth_load_function(
             vm,
-            CString::new("float sqliteReadFloat(int n, string m)")
-                .unwrap()
-                .as_ptr(),
+            c"float sqliteReadFloat(int n, string m)".as_ptr(),
             sqlite_read_float as *const c_void,
         );
 
@@ -1041,16 +1229,15 @@ fn compile_script(vm: *const c_void) -> c_int {
             let value = cyth_string_to_str(value);
 
             let Some(statement) = context.statements.get_mut((id - 1) as usize) else {
-                return cyth_new_array([].to_vec());
+                return cyth_new_array([].iter().copied());
             };
 
-            cyth_new_array(statement.read::<Vec<u8>, &str>(value).unwrap_or_default())
+            let bytes = statement.read::<Vec<u8>, &str>(value).unwrap_or_default();
+            cyth_new_array(bytes.iter().copied())
         }
         cyth_load_function(
             vm,
-            CString::new("char[] sqliteReadBytes(int n, string m)")
-                .unwrap()
-                .as_ptr(),
+            c"char[] sqliteReadBytes(int n, string m)".as_ptr(),
             sqlite_read_char as *const c_void,
         );
 
@@ -1068,9 +1255,7 @@ fn compile_script(vm: *const c_void) -> c_int {
         }
         cyth_load_function(
             vm,
-            CString::new("string sqliteReadString(int n, string m)")
-                .unwrap()
-                .as_ptr(),
+            c"string sqliteReadString(int n, string m)".as_ptr(),
             sqlite_read_string as *const c_void,
         );
 
@@ -1087,9 +1272,7 @@ fn compile_script(vm: *const c_void) -> c_int {
         }
         cyth_load_function(
             vm,
-            CString::new("bool sqliteReadNull(int n, string m)")
-                .unwrap()
-                .as_ptr(),
+            c"bool sqliteReadNull(int n, string m)".as_ptr(),
             sqlite_read_null as *const c_void,
         );
 
@@ -1131,13 +1314,12 @@ fn request(mut req: Request, context: &mut Context, scripts: &mut HashMap<String
     {
         unsafe {
             let (source, text, mapping) = read_script(&path);
-
             context.path = path;
             context.mapping = mapping.clone();
             context.output.clear();
 
             let builtins = CString::new(BUILTINS).unwrap();
-            let builtins_filename = CString::new("<builtin>").unwrap();
+            let builtins_filename = c"<builtin>";
             let source = CString::new(source).unwrap();
             let source_filename = CString::new(context.path.clone()).unwrap();
 
@@ -1168,10 +1350,40 @@ fn request(mut req: Request, context: &mut Context, scripts: &mut HashMap<String
             }
 
             let script = Script {
+                vm,
+                mapping,
                 modified: metadata.modified().unwrap(),
                 text: text.into(),
-                mapping,
-                vm,
+                functions: Functions {
+                    json_number: std::mem::transmute(cyth_get_function(
+                        vm,
+                        c"jsonNumber.any(float)".as_ptr(),
+                    )),
+                    json_bool: std::mem::transmute(cyth_get_function(
+                        vm,
+                        c"jsonBool.any(bool)".as_ptr(),
+                    )),
+                    json_string: std::mem::transmute(cyth_get_function(
+                        vm,
+                        c"jsonString.any(string)".as_ptr(),
+                    )),
+                    json_array: std::mem::transmute(cyth_get_function(
+                        vm,
+                        c"jsonArray.any(any[])".as_ptr(),
+                    )),
+                    json_object: std::mem::transmute(cyth_get_function(
+                        vm,
+                        c"jsonObject.any(Map<string, any>)".as_ptr(),
+                    )),
+                    map_init: std::mem::transmute(cyth_get_function(
+                        vm,
+                        c"Map<string, any>".as_ptr(),
+                    )),
+                    map_set: std::mem::transmute(cyth_get_function(
+                        vm,
+                        c"Map<string, any>.__set__.void(string, any)".as_ptr(),
+                    )),
+                },
             };
 
             run_script(&mut req, context, &script);
