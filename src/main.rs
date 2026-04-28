@@ -371,6 +371,7 @@ class Statement
 class JsonNumber
     float value
 
+    void __init__()
     void __init__(float value)
         this.value = value
 
@@ -380,6 +381,7 @@ any jsonNumber(float value)
 class JsonString
     string value
 
+    void __init__()
     void __init__(string value)
         this.value = value
 
@@ -388,7 +390,8 @@ any jsonString(string value)
 
 class JsonBool
     bool value
-
+    
+    void __init__()
     void __init__(bool value)
         this.value = value
 
@@ -398,11 +401,15 @@ any jsonBool(bool value)
 class JsonArray
     any[] value
 
+    void __init__()
     void __init__(any[] value)
         this.value = value
 
     any __get__(int index)
         return this.value[index]
+    
+    void push(any value)
+        this.value.push(value)
 
     int length()
         return this.value.length
@@ -412,6 +419,9 @@ any jsonArray(any[] value)
 
 class JsonObject
     Map<string, any> value
+    
+    void __init__()
+        this.value = Map<string, any>()
 
     void __init__(Map<string, any> value)
         this.value = value
