@@ -390,7 +390,7 @@ any jsonString(string value)
 
 class JsonBool
     bool value
-    
+
     void __init__()
     void __init__(bool value)
         this.value = value
@@ -408,7 +408,19 @@ class JsonArray
     any __get__(int index)
         return this.value[index]
     
-    void push(any value)
+    void push(bool value)
+        this.value.push(JsonBool(value))
+
+    void push(float value)
+        this.value.push(JsonNumber(value))
+
+    void push(string value)
+        this.value.push(JsonString(value))
+    
+    void push(JsonArray value)
+        this.value.push(value)
+    
+    void push(JsonObject value)
         this.value.push(value)
 
     int length()
@@ -419,14 +431,26 @@ any jsonArray(any[] value)
 
 class JsonObject
     Map<string, any> value
-    
+
     void __init__()
         this.value = Map<string, any>()
 
     void __init__(Map<string, any> value)
         this.value = value
 
-    void __set__(string key, any val)
+    void __set__(string key, bool val)
+        this.value[key] = JsonBool(val)
+        
+    void __set__(string key, float val)
+        this.value[key] = JsonNumber(val)
+
+    void __set__(string key, string val)
+        this.value[key] = JsonString(val)
+
+    void __set__(string key, JsonArray val)
+        this.value[key] = val
+    
+    void __set__(string key, JsonObject val)
         this.value[key] = val
 
     any __get__(string key)
@@ -543,22 +567,6 @@ class Map<K, V>
             h *= -1
         return h
 
-    void resize()
-        K[] oldKeys = keys
-        V[] oldValues = values
-        bool[] oldUsed = used
-        int oldCount = bucketCount
-
-        bucketCount = bucketCount * 2
-        size = 0
-        keys.reserve(bucketCount)
-        values.reserve(bucketCount)
-        used.reserve(bucketCount)
-
-        for int i = 0; i < oldCount; i += 1
-            if oldUsed[i]
-                insert(oldKeys[i], oldValues[i])
-
     void insert(K key, V value)
         int index = hash(key)
 
@@ -574,7 +582,24 @@ class Map<K, V>
         size += 1
 
     void insertAndResize(K key, V value)
+        void resize()
+            K[] oldKeys = keys
+            V[] oldValues = values
+            bool[] oldUsed = used
+            int oldCount = bucketCount
+
+            bucketCount = bucketCount * 2
+            size = 0
+            keys.reserve(bucketCount)
+            values.reserve(bucketCount)
+            used.reserve(bucketCount)
+
+            for int i = 0; i < oldCount; i += 1
+                if oldUsed[i]
+                    insert(oldKeys[i], oldValues[i])
+
         insert(key, value)
+
         float threshold = 0.75
         if size > bucketCount * threshold
             resize()
