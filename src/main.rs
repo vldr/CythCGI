@@ -149,7 +149,7 @@ fn cyth_new_array<T: Copy>(list: impl ExactSizeIterator<Item = T>) -> *const CyA
     }
 }
 
-unsafe extern "C" fn cyth_new_json(value: &serde_json::Value) -> *const c_void {
+fn cyth_new_json(value: &serde_json::Value) -> *const c_void {
     let context = unsafe { &mut *CONTEXT };
 
     match value {
@@ -1039,7 +1039,7 @@ fn compile_script(vm: *const c_void) -> c_int {
         unsafe extern "C" fn json_decode(json: *const CyString) -> *const c_void {
             let json = cyth_string_to_str(json);
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(json) {
-                return unsafe { cyth_new_json(&value) };
+                return cyth_new_json(&value);
             }
 
             null()
