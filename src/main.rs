@@ -274,45 +274,6 @@ Map<string, string> parseQuery(string query)
 
     return result
 
-int parseInt(string n, int base)
-    n = n.trim()
-    if not n
-        return 0
-
-    int index = 0
-    bool negative = false
-
-    if n[0] == '+'
-        index += 1
-    else if n[0] == '-'
-        negative = true
-        index += 1
-
-    int value = 0
-    while index < n.length
-        char c = n[index]
-        int digit
-
-        if c >= '0' and c <= '9'
-            digit = c - '0'
-        else if c >= 'A' and c <= 'Z'
-            digit = c - 'A' + 10
-        else if c >= 'a' and c <= 'z'
-            digit = c - 'a' + 10
-        else
-            break
-
-        if digit >= base
-            break
-
-        value = value * base + digit
-        index += 1
-
-    if negative
-        value = -value
-
-    return value
-
 class Database
     int con
 
@@ -830,6 +791,39 @@ fn compile_script(vm: *const c_void) -> c_int {
             vm,
             c"void printInternal(int n)".as_ptr(),
             print_internal as *const c_void,
+        );
+
+        unsafe extern "C" fn parse_int(input: *const CyString, radix: c_int) -> c_int {
+            let input = cyth_string_to_str(input);
+
+            c_int::from_str_radix(input, radix as u32).unwrap_or_default()
+        }
+        cyth_load_function(
+            vm,
+            c"int parseInt(string n, int m)".as_ptr(),
+            parse_int as *const c_void,
+        );
+
+        unsafe extern "C" fn parse_int2(input: *const CyString) -> c_int {
+            let input = cyth_string_to_str(input);
+
+            c_int::from_str_radix(input, 10).unwrap_or_default()
+        }
+        cyth_load_function(
+            vm,
+            c"int parseInt(string n)".as_ptr(),
+            parse_int2 as *const c_void,
+        );
+
+        unsafe extern "C" fn parse_float(input: *const CyString) -> c_float {
+            let input = cyth_string_to_str(input);
+
+            input.parse::<f32>().unwrap_or_default()
+        }
+        cyth_load_function(
+            vm,
+            c"float parseFloat(string n)".as_ptr(),
+            parse_float as *const c_void,
         );
 
         unsafe extern "C" fn url_encode(input: *const CyString) -> *const CyString {
