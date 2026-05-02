@@ -1,4 +1,6 @@
 fn main() {
+    println!("cargo:rerun-if-changed=vendor/cyth/");
+
     let mut build = cc::Build::new();
     build
         .opt_level(3)
