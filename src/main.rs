@@ -1445,11 +1445,29 @@ fn main() -> ExitCode {
         fastcgi::run_tcp(move |req| request(req, context, &mut scripts), &listener);
     } else {
         #[cfg(unix)]
-        fastcgi::run(move |req| request(req, context, &mut scripts));
+        {
+            if unsafe {
+                libc::getsockopt(
+                    0,
+                    libc::SOL_SOCKET,
+                    libc::SO_TYPE,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                ) == -1
+            } {
+                println!("Could not find a UNIX socket.");
+                return ExitCode::FAILURE;
+            }
+
+            fastcgi::run(move |req| request(req, context, &mut scripts));
+        }
 
         #[cfg(windows)]
         {
             use std::os::windows::io::{FromRawSocket, RawSocket};
+            use windows::Win32::Networking::WinSock::{
+                SOCKET, SOCKET_ERROR, WSAEnumNetworkEvents, WSANETWORKEVENTS,
+            };
             use windows::Win32::Networking::WinSock::{WSADATA, WSAStartup};
             use windows::Win32::System::Console::{GetStdHandle, STD_INPUT_HANDLE};
 
@@ -1457,13 +1475,25 @@ fn main() -> ExitCode {
                 let mut data = WSADATA::default();
                 let result = WSAStartup(0x0202, &mut data);
                 if result != 0 {
-                    panic!("WSAStartup failed: {}", result);
+                    println!("WSAStartup failed: {}", result);
+                    return ExitCode::FAILURE;
                 }
 
-                let handle = GetStdHandle(STD_INPUT_HANDLE);
-                let socket = handle.unwrap().0 as RawSocket;
-                let listener =
-                    TcpListener::from_raw_socket(socket as std::os::windows::io::RawSocket);
+                let Ok(handle) = GetStdHandle(STD_INPUT_HANDLE) else {
+                    println!("Could not get a standard input handle.");
+                    return ExitCode::FAILURE;
+                };
+
+                let mut events: WSANETWORKEVENTS = std::mem::zeroed();
+                if WSAEnumNetworkEvents(SOCKET(handle.0 as usize), None, &mut events)
+                    == SOCKET_ERROR
+                {
+                    println!("Could not find a TCP socket in standard input.");
+                    return ExitCode::FAILURE;
+                }
+
+                let socket = handle.0 as RawSocket;
+                let listener = TcpListener::from_raw_socket(socket);
 
                 fastcgi::run_tcp(move |req| request(req, context, &mut scripts), &listener);
             }
