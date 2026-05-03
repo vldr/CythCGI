@@ -1449,8 +1449,24 @@ fn main() -> ExitCode {
 
         #[cfg(windows)]
         {
-            println!("error: unix sockets are not supported on this platform");
-            return ExitCode::FAILURE;
+            use std::os::windows::io::{FromRawSocket, RawSocket};
+            use windows::Win32::Networking::WinSock::{WSADATA, WSAStartup};
+            use windows::Win32::System::Console::{GetStdHandle, STD_INPUT_HANDLE};
+
+            unsafe {
+                let mut data = WSADATA::default();
+                let result = WSAStartup(0x0202, &mut data);
+                if result != 0 {
+                    panic!("WSAStartup failed: {}", result);
+                }
+
+                let handle = GetStdHandle(STD_INPUT_HANDLE);
+                let socket = handle.unwrap().0 as RawSocket;
+                let listener =
+                    TcpListener::from_raw_socket(socket as std::os::windows::io::RawSocket);
+
+                fastcgi::run_tcp(move |req| request(req, context, &mut scripts), &listener);
+            }
         }
     }
 

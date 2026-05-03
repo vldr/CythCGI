@@ -695,8 +695,13 @@ where
 
         if allow {
             let sock = Rc::new(sock);
-            let (request_id, role, keep_conn) = Request::begin(&sock).unwrap();
-            handler(Request::new(sock.clone(), request_id, role).unwrap());
+
+            loop {
+                let (request_id, role, keep_conn) = Request::begin(&sock).unwrap();
+                handler(Request::new(sock.clone(), request_id, role).unwrap());
+
+                if !keep_conn { break; }
+            }
         }
     }
 }
