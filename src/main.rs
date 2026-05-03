@@ -1446,13 +1446,15 @@ fn main() -> ExitCode {
     } else {
         #[cfg(unix)]
         {
+            let mut optval: libc::c_int = 0;
+            let mut optlen: libc::socklen_t = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
             if unsafe {
                 libc::getsockopt(
                     0,
                     libc::SOL_SOCKET,
                     libc::SO_TYPE,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
+                    &mut optval as *mut _ as *mut libc::c_void,
+                    &mut optlen,
                 ) == -1
             } {
                 println!("Could not find a UNIX socket.");
