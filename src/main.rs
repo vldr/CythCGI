@@ -194,46 +194,42 @@ extern "C" fn error_callback(
     filename: *const c_char,
     start_line: c_int,
     start_column: c_int,
-    end_line: c_int,
-    end_column: c_int,
+    _end_line: c_int,
+    _end_column: c_int,
     message: *const c_char,
 ) {
     let context = unsafe { &mut *CONTEXT };
-    let message = unsafe { CStr::from_ptr(message).to_str().unwrap_or("") };
-    let filename = unsafe { CStr::from_ptr(filename).to_str().unwrap_or("") };
+    let message = unsafe { CStr::from_ptr(message).to_str().unwrap_or_default() };
+    let filename = unsafe { CStr::from_ptr(filename).to_str().unwrap_or_default() };
 
-    if filename == context.path {
-        let (mapped_start_line, mapped_start_column) = context
+    let (mapped_line, mapped_column) = if filename == context.path {
+        context
             .mapping
             .get((start_line - 1) as usize)
             .copied()
-            .unwrap_or((start_line, 0));
-
-        let (mapped_end_line, mapped_end_column) = context
-            .mapping
-            .get((end_line - 1) as usize)
-            .copied()
-            .unwrap_or((end_line, 0));
-
-        context.output.push_str(&format!(
-            "{}:{}:{}-{}:{}: {}\n",
-            filename,
-            mapped_start_line,
-            mapped_start_column + start_column,
-            mapped_end_line,
-            mapped_end_column + end_column,
-            message
-        ));
+            .unwrap_or((start_line, 0))
     } else {
-        context.output.push_str(&format!(
-            "{}:{}:{}-{}:{}: {}\n",
-            filename, start_line, start_column, end_line, end_column, message
-        ));
-    }
+        (start_line, 0)
+    };
+
+    context.output.push_str(&format!(
+        "{}:{}:{}: {}\n",
+        filename,
+        mapped_line,
+        mapped_column + start_column,
+        message
+    ));
 }
 
-extern "C" fn panic_callback(function: *const c_char, line: c_int, column: c_int) {
+extern "C" fn panic_callback(
+    filename: *const c_char,
+    function: *const c_char,
+    line: c_int,
+    column: c_int,
+) {
     let context = unsafe { &mut *CONTEXT };
+    let function = unsafe { CStr::from_ptr(function).to_str().unwrap_or_default() };
+    let filename = unsafe { CStr::from_ptr(filename).to_str().unwrap_or_default() };
 
     if line == 0 && column == 0 {
         context.headers.clear();
@@ -242,19 +238,22 @@ extern "C" fn panic_callback(function: *const c_char, line: c_int, column: c_int
             .push_str("Status: 500 Internal Server Error\n");
         context.headers.push_str("Content-Type: text/plain\n");
 
-        context.output.push_str(&format!("{}\n", unsafe {
-            CStr::from_ptr(function).to_str().unwrap()
-        }));
+        context.output.push_str(&format!("{}\n", function));
     } else {
-        let (mapped_line, mapped_column) = context
-            .mapping
-            .get((line - 1) as usize)
-            .copied()
-            .unwrap_or((line, 0));
+        let (mapped_line, mapped_column) = if filename == context.path {
+            context
+                .mapping
+                .get((line - 1) as usize)
+                .copied()
+                .unwrap_or((line, 0))
+        } else {
+            (line, 0)
+        };
 
         context.output.push_str(&format!(
-            "  at {}:{}:{}\n",
-            unsafe { CStr::from_ptr(function).to_str().unwrap() },
+            "  at {} ({}:{}:{})\n",
+            function,
+            filename,
             mapped_line,
             mapped_column + column,
         ));
@@ -1468,9 +1467,8 @@ fn main() -> ExitCode {
         {
             use std::os::windows::io::{FromRawSocket, RawSocket};
             use windows::Win32::Networking::WinSock::{
-                SOCKET, SOCKET_ERROR, WSAEnumNetworkEvents, WSANETWORKEVENTS,
+                SOCKET, SOCKET_ERROR, WSADATA, WSAEnumNetworkEvents, WSANETWORKEVENTS, WSAStartup,
             };
-            use windows::Win32::Networking::WinSock::{WSADATA, WSAStartup};
             use windows::Win32::System::Console::{GetStdHandle, STD_INPUT_HANDLE};
 
             unsafe {

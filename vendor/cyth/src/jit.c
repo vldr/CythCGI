@@ -73,7 +73,7 @@ struct _CY_VM
   int logging;
   void (*error_callback)(const char* filename, int start_line, int start_column, int end_line,
                          int end_column, const char* message);
-  void (*panic_callback)(const char* function, int line, int column);
+  void (*panic_callback)(const char* filename, const char* function, int line, int column);
 };
 
 static void generate_default_initialization(CyVM* vm, MIR_reg_t dest, DataType data_type);
@@ -92,7 +92,7 @@ CyVM* panic_vm;
 static void panic(CyVM* vm, const char* what, uintptr_t pc, uintptr_t fp)
 {
   if (vm->panic_callback)
-    vm->panic_callback(what, 0, 0);
+    vm->panic_callback(what, what, 0, 0);
 
   for (MIR_item_t item = DLIST_TAIL(MIR_item_t, vm->module->items); item != NULL;
        item = DLIST_PREV(MIR_item_t, item))
@@ -101,7 +101,7 @@ static void panic(CyVM* vm, const char* what, uintptr_t pc, uintptr_t fp)
       continue;
 
     const uintptr_t base = (uintptr_t)item->u.func->machine_code;
-    if (pc < base || pc >= base + item->u.func->length)
+    if (pc < base || pc > base + item->u.func->length)
       continue;
 
     uintptr_t offset = 0;
@@ -112,17 +112,21 @@ static void panic(CyVM* vm, const char* what, uintptr_t pc, uintptr_t fp)
       const uintptr_t ptr = base + offset;
       if (pc >= ptr && pc < ptr + insn->size)
       {
-        if (insn->location.name && insn->location.line && insn->location.column)
+        if (insn->location.function && insn->location.line && insn->location.column)
         {
           if (vm->panic_callback)
-            vm->panic_callback(insn->location.name, insn->location.line, insn->location.column);
+            vm->panic_callback(MIR_alias_name(vm->ctx, insn->location.filename),
+                               MIR_alias_name(vm->ctx, insn->location.function),
+                               insn->location.line, insn->location.column);
 
           MIR_location_t* location = MIR_get_location(vm->ctx, insn->location.next);
           while (location)
           {
-            if (location->name && location->line && location->column)
+            if (location->function && location->line && location->column)
               if (vm->panic_callback)
-                vm->panic_callback(location->name, location->line, location->column);
+                vm->panic_callback(MIR_alias_name(vm->ctx, location->filename),
+                                   MIR_alias_name(vm->ctx, location->function), location->line,
+                                   location->column);
 
             location = MIR_get_location(vm->ctx, location->next);
           }
@@ -155,7 +159,7 @@ static void panic(CyVM* vm, const char* what, uintptr_t pc, uintptr_t fp)
         continue;
 
       const uintptr_t base = (uintptr_t)item->u.func->machine_code;
-      if (pc < base || pc >= base + item->u.func->length)
+      if (pc < base || pc > base + item->u.func->length)
         continue;
 
       uintptr_t offset = 0;
@@ -168,17 +172,21 @@ static void panic(CyVM* vm, const char* what, uintptr_t pc, uintptr_t fp)
         const uintptr_t ptr = base + offset;
         if (pc >= ptr && pc < ptr + insn->size)
         {
-          if (insn->location.name && insn->location.line && insn->location.column)
+          if (insn->location.function && insn->location.line && insn->location.column)
           {
             if (vm->panic_callback)
-              vm->panic_callback(insn->location.name, insn->location.line, insn->location.column);
+              vm->panic_callback(MIR_alias_name(vm->ctx, insn->location.filename),
+                                 MIR_alias_name(vm->ctx, insn->location.function),
+                                 insn->location.line, insn->location.column);
 
             MIR_location_t* location = MIR_get_location(vm->ctx, insn->location.next);
             while (location)
             {
-              if (location->name && location->line && location->column)
+              if (location->function && location->line && location->column)
                 if (vm->panic_callback)
-                  vm->panic_callback(location->name, location->line, location->column);
+                  vm->panic_callback(MIR_alias_name(vm->ctx, location->filename),
+                                     MIR_alias_name(vm->ctx, location->function), location->line,
+                                     location->column);
 
               location = MIR_get_location(vm->ctx, location->next);
             }
@@ -199,7 +207,17 @@ static void panic(CyVM* vm, const char* what, uintptr_t pc, uintptr_t fp)
   cyth_longjmp()(*vm->jmp, 1);
 }
 
-static void panic_callback(const char* function, int line, int column)
+static MIR_insn_t generate_debug_info(CyVM* vm, Token token, MIR_insn_t insn)
+{
+  insn->location.line = token.start_line;
+  insn->location.column = token.start_column;
+  insn->location.function = MIR_alias(vm->ctx, vm->function->u.func->name);
+  insn->location.filename = MIR_alias(vm->ctx, token.filename ? token.filename : "");
+
+  return insn;
+}
+
+static void panic_callback(const char* filename, const char* function, int line, int column)
 {
   static const char* previous_function;
   static int previous_line;
@@ -217,7 +235,11 @@ static void panic_callback(const char* function, int line, int column)
     }
     else
     {
-      fprintf(stderr, "  at %s:%d:%d\n", function, line, column);
+      if (*filename)
+        fprintf(stderr, "  at %s (%s:%d:%d)\n", function, filename, line, column);
+      else
+        fprintf(stderr, "  at %s:%d:%d\n", function, line, column);
+
       previous_count = 0;
     }
   }
@@ -234,8 +256,8 @@ static void panic_callback(const char* function, int line, int column)
 static void error_callback(const char* filename, int start_line, int start_column, int end_line,
                            int end_column, const char* message)
 {
-  fprintf(stderr, "%s%s%d:%d-%d:%d: error: %s\n", filename ? filename : "", filename ? ":" : "",
-          start_line, start_column, end_line, end_column, message);
+  fprintf(stderr, "%s%s%d:%d-%d:%d: error: %s\n", filename, *filename ? ":" : "", start_line,
+          start_column, end_line, end_column, message);
 }
 
 static int string_equals(CyString* left, CyString* right)
@@ -474,15 +496,6 @@ static FuncStmt* get_function_member(DataType data_type, const char* name)
 
   FuncStmt* function = variable->data_type.function_member.function;
   return function;
-}
-
-static MIR_insn_t generate_debug_info(CyVM* vm, Token token, MIR_insn_t insn)
-{
-  insn->location.line = token.start_line;
-  insn->location.column = token.start_column;
-  insn->location.name = vm->function->u.func->name;
-
-  return insn;
 }
 
 static void generate_malloc_expression(CyVM* vm, MIR_reg_t dest, MIR_op_t size)
@@ -5133,7 +5146,8 @@ void cyth_set_error_callback(CyVM* vm, void (*error_callback)(const char* filena
 }
 
 void cyth_set_panic_callback(CyVM* vm,
-                             void (*panic_callback)(const char* function, int line, int column))
+                             void (*panic_callback)(const char* filename, const char* function,
+                                                    int line, int column))
 {
   vm->panic_callback = panic_callback;
 }

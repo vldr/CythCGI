@@ -48,7 +48,7 @@ static void log_string(CyString* n)
   putchar('\n');
 }
 
-static void panic_callback(const char* function, int line, int column)
+static void panic_callback(const char* filename, const char* function, int line, int column)
 {
   if (line && column)
   {
@@ -62,7 +62,11 @@ static void panic_callback(const char* function, int line, int column)
     }
     else
     {
-      fprintf(stderr, "  at %s:%d:%d\n", function, line, column);
+      if (*filename)
+        fprintf(stderr, "  at %s (%s:%d:%d)\n", function, filename, line, column);
+      else
+        fprintf(stderr, "  at %s:%d:%d\n", function, line, column);
+
       cyth.previous_count = 0;
     }
   }
@@ -80,8 +84,8 @@ static void panic_callback(const char* function, int line, int column)
 static void error_callback(const char* filename, int start_line, int start_column, int end_line,
                            int end_column, const char* message)
 {
-  fprintf(stderr, "%s%s%d:%d-%d:%d: error: %s\n", filename ? filename : "", filename ? ":" : "",
-          start_line, start_column, end_line, end_column, message);
+  fprintf(stderr, "%s%s%d:%d-%d:%d: error: %s\n", filename, *filename ? ":" : "", start_line,
+          start_column, end_line, end_column, message);
 
   cyth.error = true;
 }
@@ -132,18 +136,17 @@ void run(char* source)
 #ifdef WASM
   if (cyth.wasm)
   {
+    cyth_wasm_init();
     cyth_wasm_set_error_callback(error_callback);
     cyth_wasm_set_result_callback(result_callback);
+    cyth_wasm_load_function("void log(int n)", "env");
+    cyth_wasm_load_function("void log(bool n)", "env");
+    cyth_wasm_load_function("void log(float n)", "env");
+    cyth_wasm_load_function("void log(char n)", "env");
+    cyth_wasm_load_function("void log(string n)", "env");
 
-    if (cyth_wasm_init(cyth.input_path, source))
-    {
-      cyth_wasm_load_function("void log(int n)", "env");
-      cyth_wasm_load_function("void log(bool n)", "env");
-      cyth_wasm_load_function("void log(float n)", "env");
-      cyth_wasm_load_function("void log(char n)", "env");
-      cyth_wasm_load_function("void log(string n)", "env");
+    if (cyth_wasm_load_string(cyth.input_path, source))
       cyth_wasm_compile(true, cyth.logging);
-    }
   }
   else
 #endif
