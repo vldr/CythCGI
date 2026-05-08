@@ -52,7 +52,7 @@ struct Context {
 #[derive(Copy, Clone)]
 struct Functions {
     json_number: unsafe extern "C" fn(number: f32) -> *const c_void,
-    json_bool: unsafe extern "C" fn(bool: c_int) -> *const c_void,
+    json_bool: unsafe extern "C" fn(bool: bool) -> *const c_void,
     json_string: unsafe extern "C" fn(string: *const CyString) -> *const c_void,
     json_array: unsafe extern "C" fn(array: *const CyArray<*const c_void>) -> *const c_void,
     json_object: unsafe extern "C" fn(map: *const c_void) -> *const c_void,
@@ -67,16 +67,32 @@ impl Default for Functions {
 }
 
 #[repr(C)]
+#[derive(Copy, Clone)]
 pub struct CyString {
     pub size: i32,
     pub data: [u8; 0],
 }
 
 #[repr(C)]
+#[derive(Copy, Clone)]
 pub struct CyArray<T> {
     pub size: i32,
     pub capacity: i32,
     pub data: *mut T,
+}
+
+impl<T> CyArray<T> {
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        unsafe { std::slice::from_raw_parts(self.data, self.size as usize).iter() }
+    }
+}
+
+#[repr(C)]
+pub struct FetchOptions {
+    pub method: *mut CyString,
+    pub body: *mut CyString,
+    pub header_keys: *mut CyArray<*mut CyString>,
+    pub header_values: *mut CyArray<*mut CyString>,
 }
 
 unsafe extern "C" {
@@ -154,7 +170,7 @@ fn cyth_new_json(value: &serde_json::Value) -> *const c_void {
 
     match value {
         serde_json::Value::Null => null(),
-        serde_json::Value::Bool(value) => unsafe { (context.functions.json_bool)(*value as i32) },
+        serde_json::Value::Bool(value) => unsafe { (context.functions.json_bool)(*value) },
         serde_json::Value::Number(value) => unsafe {
             (context.functions.json_number)(value.as_f64().unwrap() as f32)
         },
@@ -272,6 +288,69 @@ Map<string, string> parseQuery(string query)
             result.insert(parts[0], urlDecode(parts[1]))
 
     return result
+
+void sort<T>(T[] array, bool(T, T) comp)
+    void swap(T[] array, int i, int j)
+        T temp = array[i]
+        array[i] = array[j]
+        array[j] = temp
+    
+    int partition(T[] array, bool(T, T) comp, int low, int high)
+        T pivot = array[high]
+        int i = low - 1
+
+        for int j = low; j < high; j = j + 1
+            if comp(array[j], pivot)
+                i += 1
+                
+                swap(array, i, j)
+
+        swap(array, i + 1, high)
+        return i + 1
+
+    int low = 0
+    int high = array.length - 1
+    
+    if low >= high
+        return
+    
+    int[] stack 
+    stack.push(low)
+    stack.push(high)
+
+    while stack.length > 0
+        high = stack.pop()
+        low = stack.pop()
+
+        int p = partition(array, comp, low, high)
+
+        if p - 1 > low
+            stack.push(low)
+            stack.push(p - 1)
+
+        if p + 1 < high
+            stack.push(p + 1)
+            stack.push(high)
+
+class FetchOptions
+    string method_
+    string body_
+    string[] headerKeys
+    string[] headerValues
+
+    FetchOptions method(string method)
+        method_ = method
+        return this
+
+    FetchOptions body(string body)
+        body_ = body
+        return this
+
+    FetchOptions header(string key, string value)
+        headerKeys.push(key)
+        headerValues.push(value)
+    
+        return this
 
 class Database
     int con
@@ -550,6 +629,9 @@ class Map<K, V>
 
             bucketCount = bucketCount * 2
             size = 0
+            keys = []
+            values = []
+            used = []
             keys.reserve(bucketCount)
             values.reserve(bucketCount)
             used.reserve(bucketCount)
@@ -792,7 +874,7 @@ fn compile_script(vm: *const c_void) -> c_int {
             print_internal as *const c_void,
         );
 
-        unsafe extern "C" fn parse_int(input: *const CyString, radix: c_int) -> c_int {
+        unsafe extern "C" fn parse_int_radix(input: *const CyString, radix: c_int) -> c_int {
             let input = cyth_string_to_str(input);
 
             c_int::from_str_radix(input, radix as u32).unwrap_or_default()
@@ -800,10 +882,10 @@ fn compile_script(vm: *const c_void) -> c_int {
         cyth_load_function(
             vm,
             c"int parseInt(string n, int m)".as_ptr(),
-            parse_int as *const c_void,
+            parse_int_radix as *const c_void,
         );
 
-        unsafe extern "C" fn parse_int2(input: *const CyString) -> c_int {
+        unsafe extern "C" fn parse_int(input: *const CyString) -> c_int {
             let input = cyth_string_to_str(input);
 
             c_int::from_str_radix(input, 10).unwrap_or_default()
@@ -811,7 +893,7 @@ fn compile_script(vm: *const c_void) -> c_int {
         cyth_load_function(
             vm,
             c"int parseInt(string n)".as_ptr(),
-            parse_int2 as *const c_void,
+            parse_int as *const c_void,
         );
 
         unsafe extern "C" fn parse_float(input: *const CyString) -> c_float {
@@ -882,7 +964,7 @@ fn compile_script(vm: *const c_void) -> c_int {
         }
         cyth_load_function(vm, c"string hash(string n)".as_ptr(), hash as *const c_void);
 
-        unsafe extern "C" fn verify(password: *const CyString, hash: *const CyString) -> c_int {
+        unsafe extern "C" fn verify(password: *const CyString, hash: *const CyString) -> bool {
             let password = cyth_string_to_str(password);
             let hash = cyth_string_to_str(hash);
             let output = bcrypt::verify(password, hash).unwrap();
@@ -1012,11 +1094,11 @@ fn compile_script(vm: *const c_void) -> c_int {
         }
         cyth_load_function(vm, c"int now()".as_ptr(), now as *const c_void);
 
-        unsafe extern "C" fn fetch(uri: *const CyString) -> *const CyString {
-            let uri = cyth_string_to_str(uri);
+        unsafe extern "C" fn fetch(path: *const CyString) -> *const CyString {
+            let path = cyth_string_to_str(path);
 
-            if let Ok(mut request) = ureq::get(uri).call() {
-                let body = request.body_mut().read_to_string().unwrap_or_default();
+            if let Ok(response) = ureq::get(path).set("User-Agent", "").call() {
+                let body = response.into_string().unwrap_or_default();
 
                 cyth_new_string(&body)
             } else {
@@ -1027,6 +1109,36 @@ fn compile_script(vm: *const c_void) -> c_int {
             vm,
             c"string fetch(string n)".as_ptr(),
             fetch as *const c_void,
+        );
+
+        unsafe extern "C" fn fetch_with_options(
+            path: *const CyString,
+            options: *const FetchOptions,
+        ) -> *const CyString {
+            if options == null() {
+                return cyth_new_string("");
+            }
+
+            let path = cyth_string_to_str(path);
+            let method = cyth_string_to_str(unsafe { (*options).method });
+            let body = cyth_string_to_str(unsafe { (*options).body });
+            let header_keys = unsafe { *(*options).header_keys };
+            let header_values = unsafe { *(*options).header_values };
+
+            let mut request = ureq::request(method, path);
+            for (key, value) in header_keys.iter().zip(header_values.iter()) {
+                request = request.set(cyth_string_to_str(*key), cyth_string_to_str(*value));
+            }
+
+            match request.send_string(body) {
+                Ok(response) => cyth_new_string(&response.into_string().unwrap_or_default()),
+                Err(_) => cyth_new_string(""),
+            }
+        }
+        cyth_load_function(
+            vm,
+            c"string fetch(string n, FetchOptions options)".as_ptr(),
+            fetch_with_options as *const c_void,
         );
 
         unsafe extern "C" fn json_decode(json: *const CyString) -> *const c_void {
@@ -1066,14 +1178,14 @@ fn compile_script(vm: *const c_void) -> c_int {
             sqlite_open as *const c_void,
         );
 
-        unsafe extern "C" fn sqlite_execute(id: c_int, query: *const CyString) -> c_int {
+        unsafe extern "C" fn sqlite_execute(id: c_int, query: *const CyString) -> bool {
             let context = unsafe { &mut *CONTEXT };
             let query = cyth_string_to_str(query);
             let Some(connection) = context.connections.get_mut((id - 1) as usize) else {
-                return 0;
+                return false;
             };
 
-            connection.execute(query).is_ok() as c_int
+            connection.execute(query).is_ok()
         }
         cyth_load_function(
             vm,
@@ -1112,13 +1224,13 @@ fn compile_script(vm: *const c_void) -> c_int {
             sqlite_prepare as *const c_void,
         );
 
-        unsafe extern "C" fn sqlite_bind_int(id: c_int, index: c_int, value: c_int) -> c_int {
+        unsafe extern "C" fn sqlite_bind_int(id: c_int, index: c_int, value: c_int) -> bool {
             let context = unsafe { &mut *CONTEXT };
             let Some(statement) = context.statements.get_mut((id - 1) as usize) else {
-                return 0;
+                return false;
             };
 
-            statement.bind((index as usize, value as i64)).is_ok() as c_int
+            statement.bind((index as usize, value as i64)).is_ok()
         }
         cyth_load_function(
             vm,
@@ -1126,13 +1238,13 @@ fn compile_script(vm: *const c_void) -> c_int {
             sqlite_bind_int as *const c_void,
         );
 
-        unsafe extern "C" fn sqlite_bind_float(id: c_int, index: c_int, value: c_float) -> c_int {
+        unsafe extern "C" fn sqlite_bind_float(id: c_int, index: c_int, value: c_float) -> bool {
             let context = unsafe { &mut *CONTEXT };
             let Some(statement) = context.statements.get_mut((id - 1) as usize) else {
-                return 0;
+                return false;
             };
 
-            statement.bind((index as usize, value as f64)).is_ok() as c_int
+            statement.bind((index as usize, value as f64)).is_ok()
         }
         cyth_load_function(
             vm,
@@ -1144,14 +1256,14 @@ fn compile_script(vm: *const c_void) -> c_int {
             id: c_int,
             index: c_int,
             value: *const CyArray<u8>,
-        ) -> c_int {
+        ) -> bool {
             let context = unsafe { &mut *CONTEXT };
             let Some(statement) = context.statements.get_mut((id - 1) as usize) else {
-                return 0;
+                return false;
             };
 
             let slice = cyth_char_array_to_slice(value);
-            statement.bind((index as usize, slice)).is_ok() as c_int
+            statement.bind((index as usize, slice)).is_ok()
         }
         cyth_load_function(
             vm,
@@ -1163,14 +1275,14 @@ fn compile_script(vm: *const c_void) -> c_int {
             id: c_int,
             index: c_int,
             value: *const CyString,
-        ) -> c_int {
+        ) -> bool {
             let context = unsafe { &mut *CONTEXT };
             let value = cyth_string_to_str(value);
             let Some(statement) = context.statements.get_mut((id - 1) as usize) else {
-                return 0;
+                return false;
             };
 
-            statement.bind((index as usize, value)).is_ok() as c_int
+            statement.bind((index as usize, value)).is_ok()
         }
         cyth_load_function(
             vm,
@@ -1178,15 +1290,15 @@ fn compile_script(vm: *const c_void) -> c_int {
             sqlite_bind_string as *const c_void,
         );
 
-        unsafe extern "C" fn sqlite_bind_null(id: c_int, index: c_int) -> c_int {
+        unsafe extern "C" fn sqlite_bind_null(id: c_int, index: c_int) -> bool {
             let context = unsafe { &mut *CONTEXT };
             let Some(statement) = context.statements.get_mut((id - 1) as usize) else {
-                return 0;
+                return false;
             };
 
             statement
                 .bind((index as usize, sqlite::Value::Null))
-                .is_ok() as c_int
+                .is_ok()
         }
         cyth_load_function(
             vm,
@@ -1194,23 +1306,17 @@ fn compile_script(vm: *const c_void) -> c_int {
             sqlite_bind_null as *const c_void,
         );
 
-        unsafe extern "C" fn sqlite_next(id: c_int) -> c_int {
+        unsafe extern "C" fn sqlite_next(id: c_int) -> bool {
             let context = unsafe { &mut *CONTEXT };
             let Some(statement) = context.statements.get_mut((id - 1) as usize) else {
-                return 0;
+                return false;
             };
 
             let state = statement.next();
 
             match state {
-                Ok(state) => {
-                    if state == State::Row {
-                        1
-                    } else {
-                        0
-                    }
-                }
-                Err(_) => 0,
+                Ok(state) => state == State::Row,
+                Err(_) => false,
             }
         }
         cyth_load_function(
@@ -1287,16 +1393,15 @@ fn compile_script(vm: *const c_void) -> c_int {
             sqlite_read_string as *const c_void,
         );
 
-        unsafe extern "C" fn sqlite_read_null(id: c_int, value: *const CyString) -> c_int {
+        unsafe extern "C" fn sqlite_read_null(id: c_int, value: *const CyString) -> bool {
             let context = unsafe { &mut *CONTEXT };
             let value = cyth_string_to_str(value);
             let Some(statement) = context.statements.get_mut((id - 1) as usize) else {
-                return 0;
+                return false;
             };
 
             let result: Value = statement.read(value).unwrap_or_default();
-
-            (result == Value::Null) as c_int
+            result == Value::Null
         }
         cyth_load_function(
             vm,
