@@ -1,6 +1,7 @@
 #include "array.h"
 #include "checker.h"
 #include "expression.h"
+#include "ftoa.h"
 #include "include/cyth.h"
 #include "lexer.h"
 #include "main.h"
@@ -16,7 +17,6 @@
 
 #ifdef _WIN32
 #include <Windows.h>
-#include <math.h>
 #else
 #define __USE_GNU
 #include <pthread.h>
@@ -274,39 +274,49 @@ static int string_equals(CyString* left, CyString* right)
 
 static CyString* string_int_cast(int n)
 {
-  int length = snprintf(NULL, 0, "%d", n) + 1;
-  uintptr_t size = sizeof(CyString) + length;
+  uint64_t u = n;
+  if (n < 0)
+    u = -u;
+
+  unsigned char data[24];
+  int index = ftoa_format_base10(data, sizeof(data), u);
+  if (n < 0)
+    data[--index] = '-';
+
+  int length = sizeof(data) - index;
+  uintptr_t size = sizeof(CyString) + length + 1;
 
   CyString* result = GC_malloc_atomic(size);
-  result->size = length - 1;
-
-  snprintf(result->data, length, "%d", n);
+  result->size = length;
+  result->data[length] = '\0';
+  memcpy(result->data, data + index, length);
 
   return result;
 }
 
 static CyString* string_float_cast(float n)
 {
-  int length = snprintf(NULL, 0, "%.10g", n) + 1;
-  uintptr_t size = sizeof(CyString) + length;
+  unsigned char data[512];
+  int length = ftoa(data, sizeof(data), n);
+  uintptr_t size = sizeof(CyString) + length + 1;
 
   CyString* result = GC_malloc_atomic(size);
-  result->size = length - 1;
-
-  snprintf(result->data, length, "%.10g", n);
+  result->size = length;
+  result->data[length] = '\0';
+  memcpy(result->data, data, length);
 
   return result;
 }
 
 static CyString* string_char_cast(char n)
 {
-  int length = snprintf(NULL, 0, "%c", n) + 1;
-  uintptr_t size = sizeof(CyString) + length;
+  int length = 1;
+  uintptr_t size = sizeof(CyString) + length + 1;
 
   CyString* result = GC_malloc_atomic(size);
-  result->size = length - 1;
-
-  snprintf(result->data, length, "%c", n);
+  result->size = length;
+  result->data[0] = n;
+  result->data[length] = '\0';
 
   return result;
 }
@@ -414,7 +424,7 @@ static MIR_type_t data_type_to_sized_mir_type(DataType data_type)
     return MIR_T_I64;
   case TYPE_BOOL:
   case TYPE_CHAR:
-    return MIR_T_I8;
+    return MIR_T_U8;
   case TYPE_INTEGER:
     return MIR_T_I32;
   case TYPE_FLOAT:
@@ -2309,6 +2319,7 @@ static void generate_literal_expression(CyVM* vm, MIR_reg_t dest, LiteralExpr* e
   switch (expression->data_type.type)
   {
   case TYPE_INTEGER:
+  case TYPE_CHAR:
     MIR_append_insn(vm->ctx, vm->function,
                     MIR_new_insn(vm->ctx, data_type_to_mov_type(expression->data_type),
                                  MIR_new_reg_op(vm->ctx, dest),
@@ -2330,12 +2341,6 @@ static void generate_literal_expression(CyVM* vm, MIR_reg_t dest, LiteralExpr* e
     MIR_append_insn(vm->ctx, vm->function,
                     MIR_new_insn(vm->ctx, data_type_to_mov_type(expression->data_type),
                                  MIR_new_reg_op(vm->ctx, dest), MIR_new_int_op(vm->ctx, 0)));
-    return;
-  case TYPE_CHAR:
-    MIR_append_insn(vm->ctx, vm->function,
-                    MIR_new_insn(vm->ctx, data_type_to_mov_type(expression->data_type),
-                                 MIR_new_reg_op(vm->ctx, dest),
-                                 MIR_new_int_op(vm->ctx, expression->string.data[0])));
     return;
   case TYPE_STRING:
     generate_string_literal_expression(vm, MIR_new_reg_op(vm->ctx, dest), expression->string.data,

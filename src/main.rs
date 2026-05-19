@@ -907,16 +907,6 @@ fn compile_script(vm: *const c_void) -> c_int {
             parse_float as *const c_void,
         );
 
-        unsafe extern "C" fn format_float(input: c_float, precision: c_int) ->  *const CyString {
-            let output = format!("{:.prec$}", input, prec = precision as usize);
-            cyth_new_string(&output)
-        }
-        cyth_load_function(
-            vm,
-            c"string formatFloat(float n, int m)".as_ptr(),
-            format_float as *const c_void,
-        );
-
         unsafe extern "C" fn url_encode(input: *const CyString) -> *const CyString {
             let input = cyth_string_to_str(input);
             let output = percent_encoding::utf8_percent_encode(input, NON_ALPHANUMERIC).to_string();

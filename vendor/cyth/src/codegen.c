@@ -345,16 +345,7 @@ static const char* generate_string_float_cast_function(void)
     {
       nan_exit = BinaryenIf(
         codegen.module, BinaryenBinary(codegen.module, BinaryenNeFloat32(), INPUT(), INPUT()),
-        BinaryenReturn(
-          codegen.module,
-          BinaryenSelect(
-            codegen.module,
-            BinaryenBinary(codegen.module, BinaryenShrUInt32(),
-                           BinaryenUnary(codegen.module, BinaryenReinterpretFloat32(), INPUT()),
-                           CONSTANT(31)),
-            generate_string_literal_expression("-nan", -1),
-            generate_string_literal_expression("nan", -1))),
-        NULL);
+        BinaryenReturn(codegen.module, generate_string_literal_expression("nan", -1)), NULL);
     }
 
     BinaryenExpressionRef body_list[] = {
@@ -3456,6 +3447,7 @@ static BinaryenExpressionRef generate_literal_expression(LiteralExpr* expression
   switch (expression->data_type.type)
   {
   case TYPE_INTEGER:
+  case TYPE_CHAR:
     return BinaryenConst(codegen.module, BinaryenLiteralInt32(expression->integer));
   case TYPE_FLOAT:
     return BinaryenConst(codegen.module, BinaryenLiteralFloat32(expression->floating));
@@ -3463,8 +3455,6 @@ static BinaryenExpressionRef generate_literal_expression(LiteralExpr* expression
     return BinaryenConst(codegen.module, BinaryenLiteralInt32(expression->boolean));
   case TYPE_NULL:
     return BinaryenRefNull(codegen.module, data_type_to_binaryen_type(expression->data_type));
-  case TYPE_CHAR:
-    return BinaryenConst(codegen.module, BinaryenLiteralInt32(expression->string.data[0]));
   case TYPE_STRING:
     return generate_string_literal_expression(expression->string.data, expression->string.length);
   default:
