@@ -4916,6 +4916,7 @@ static void init_variable_declaration(CyVM* vm, VarStmt* statement)
       vm->ctx,
       memory_sprintf("%s.%s", statement->name.lexeme, data_type_to_string(statement->data_type)),
       data_type_to_mir_type(statement->data_type), 1, &init);
+    statement->item->u.data->gc_root = data_type_is_pointer(statement->data_type);
 
     MIR_reg_t ptr = _MIR_new_temp_reg(vm->ctx, MIR_T_I64, vm->function->u.func);
     MIR_append_insn(vm->ctx, vm->function,
@@ -4932,6 +4933,10 @@ static void init_variable_declaration(CyVM* vm, VarStmt* statement)
         vm->ctx, data_type_to_mov_type(statement->data_type),
         MIR_new_mem_op(vm->ctx, data_type_to_mir_type(statement->data_type), 0, ptr, 0, 1),
         MIR_new_reg_op(vm->ctx, initializer)));
+  }
+  else if (statement->scope == SCOPE_LOCAL)
+  {
+    generate_default_initialization(vm, statement->reg, statement->data_type);
   }
   else
   {
@@ -5083,6 +5088,10 @@ int cyth_compile(CyVM* vm)
     ArrayVarStmt global_local_statements = checker_global_locals();
     array_foreach(&global_local_statements, global_local)
     {
+      if (global_local->index == -1)
+        continue;
+
+      global_local->scope = SCOPE_LOCAL;
       global_local->reg = MIR_new_func_reg(
         vm->ctx, vm->function->u.func, data_type_to_mir_type(global_local->data_type),
         memory_sprintf("%s.%d", global_local->name.lexeme, global_local->index));
@@ -5117,6 +5126,9 @@ int cyth_compile(CyVM* vm)
     if (item->u.data->el_type != MIR_T_I64)
       continue;
 
+    if (!item->u.data->gc_root)
+      continue;
+
     GC_add_roots(item->addr, (char*)item->addr + sizeof(uintptr_t));
   }
 
@@ -5139,6 +5151,9 @@ void cyth_destroy(CyVM* vm)
       continue;
 
     if (item->u.data->el_type != MIR_T_I64)
+      continue;
+
+    if (!item->u.data->gc_root)
       continue;
 
     GC_remove_roots(item->addr, (char*)item->addr + sizeof(uintptr_t));
