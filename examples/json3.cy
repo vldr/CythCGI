@@ -1,8 +1,12 @@
 <?
 
-string data = fetch("https://trackr.vldr.org/api/values/?apiKey=VBjOXOncKt4yMkyMDsN4964Utbxb4sdGUuijOscId246uTiTljodn9wd29P2zSGe&fieldId=1&order=asc&offset=0&limit=0")
+FetchResult data = fetch("https://trackr.vldr.org/api/values/?apiKey=VBjOXOncKt4yMkyMDsN4964Utbxb4sdGUuijOscId246uTiTljodn9wd29P2zSGe&fieldId=1&order=asc&offset=0&limit=0", 
+                        FetchOptions()
+                        .method("GET")
+                        .header("Cool", "Header")
+                    )
 
-any a = jsonDecode(data)
+any a = jsonDecode(data.body)
 JsonObject obj = (JsonObject)a
 JsonArray arr = (JsonArray)obj["values"]
 

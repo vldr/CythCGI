@@ -95,6 +95,12 @@ pub struct FetchOptions {
     pub header_values: *mut CyArray<*mut CyString>,
 }
 
+#[repr(C)]
+pub struct FetchResult {
+    pub status: c_int,
+    pub body: *mut CyString,
+}
+
 unsafe extern "C" {
     fn cyth_init() -> *const c_void;
     fn cyth_set_error_callback(vm: *const c_void, error_callback: *const c_void);
@@ -111,6 +117,20 @@ unsafe extern "C" {
     fn cyth_run(vm: *const c_void);
     fn cyth_destroy(vm: *const c_void);
     fn cyth_alloc(atomic: c_int, size: usize) -> *const c_void;
+}
+
+fn cyth_new<T>(atomic: c_int) -> *mut T {
+    unsafe {
+        let layout =
+            Layout::from_size_align(std::mem::size_of::<T>(), std::mem::align_of::<T>()).unwrap();
+
+        let cyth_object = cyth_alloc(atomic, layout.size()) as *mut T;
+        if cyth_object.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+
+        cyth_object
+    }
 }
 
 fn cyth_new_string(string: &str) -> *mut CyString {
@@ -351,6 +371,10 @@ class FetchOptions
         headerValues.push(value)
     
         return this
+
+class FetchResult
+    int status
+    string body
 
 class Database
     int con
@@ -1094,51 +1118,59 @@ fn compile_script(vm: *const c_void) -> c_int {
         }
         cyth_load_function(vm, c"int now()".as_ptr(), now as *const c_void);
 
-        unsafe extern "C" fn fetch(path: *const CyString) -> *const CyString {
-            let path = cyth_string_to_str(path);
-
-            if let Ok(response) = ureq::get(path).set("User-Agent", "").call() {
-                let body = response.into_string().unwrap_or_default();
-
-                cyth_new_string(&body)
-            } else {
-                cyth_new_string("")
-            }
-        }
-        cyth_load_function(
-            vm,
-            c"string fetch(string n)".as_ptr(),
-            fetch as *const c_void,
-        );
-
         unsafe extern "C" fn fetch_with_options(
             path: *const CyString,
             options: *const FetchOptions,
-        ) -> *const CyString {
-            if options == null() {
-                return cyth_new_string("");
-            }
-
+        ) -> *const FetchResult {
             let path = cyth_string_to_str(path);
-            let method = cyth_string_to_str(unsafe { (*options).method });
-            let body = cyth_string_to_str(unsafe { (*options).body });
-            let header_keys = unsafe { *(*options).header_keys };
-            let header_values = unsafe { *(*options).header_values };
 
-            let mut request = ureq::request(method, path);
-            for (key, value) in header_keys.iter().zip(header_values.iter()) {
-                request = request.set(cyth_string_to_str(*key), cyth_string_to_str(*value));
-            }
+            let (body, request) = if options.is_null() {
+                ("", ureq::request("GET", path))
+            } else {
+                let method = cyth_string_to_str(unsafe { (*options).method });
+                let body = cyth_string_to_str(unsafe { (*options).body });
+                let header_keys = unsafe { *(*options).header_keys };
+                let header_values = unsafe { *(*options).header_values };
 
-            match request.send_string(body) {
-                Ok(response) => cyth_new_string(&response.into_string().unwrap_or_default()),
-                Err(_) => cyth_new_string(""),
-            }
+                let mut request = ureq::request(method, path);
+                for (key, value) in header_keys.iter().zip(header_values.iter()) {
+                    request = request.set(cyth_string_to_str(*key), cyth_string_to_str(*value));
+                }
+
+                (body, request)
+            };
+
+            let response = match request.send_string(body) {
+                Ok(response) => response,
+                Err(err) => {
+                    if let Some(response) = err.into_response() {
+                        response
+                    } else {
+                        return null();
+                    }
+                }
+            };
+
+            let result = cyth_new::<FetchResult>(0);
+            unsafe { (*result).status = response.status() as c_int };
+            unsafe {
+                (*result).body = cyth_new_string(&response.into_string().unwrap_or_default())
+            };
+            result
         }
         cyth_load_function(
             vm,
-            c"string fetch(string n, FetchOptions options)".as_ptr(),
+            c"FetchResult fetch(string n, FetchOptions options)".as_ptr(),
             fetch_with_options as *const c_void,
+        );
+
+        unsafe extern "C" fn fetch(path: *const CyString) -> *const FetchResult {
+            unsafe { fetch_with_options(path, null()) }
+        }
+        cyth_load_function(
+            vm,
+            c"FetchResult fetch(string n)".as_ptr(),
+            fetch as *const c_void,
         );
 
         unsafe extern "C" fn json_decode(json: *const CyString) -> *const c_void {
@@ -1531,12 +1563,28 @@ fn request(mut req: Request, context: &mut Context, scripts: &mut HashMap<String
     }
 }
 
-fn main() -> ExitCode {
-    if env::args().count() < 1 {
-        println!("usage: cyth-cgi [listen address]");
-        return ExitCode::FAILURE;
-    }
+fn info() {
+    eprintln!("usage: cyth-cgi [listen address]");
+    eprintln!();
 
+    #[cfg(unix)]
+    eprintln!("When no arguments are provided, cyth-cgi expects file descriptor 0 to be a");
+    #[cfg(unix)]
+    eprintln!("listening UNIX socket provided by systemd or another service manager.");
+
+    #[cfg(windows)]
+    eprintln!("When no arguments are provided, cyth-cgi expects the standard input");
+    #[cfg(windows)]
+    eprintln!("handle to be a bound WinSock TCP socket. The IIS FastCGI module");
+    #[cfg(windows)]
+    eprintln!("will do this for you automatically when its protocol is set to TCP.");
+
+    eprintln!();
+    eprintln!("When an argument is provided, cyth-cgi will bind and listen on the");
+    eprintln!("given TCP address.");
+}
+
+fn main() -> ExitCode {
     let context = Box::leak(Box::new(Context::default()));
     let mut scripts = HashMap::<String, Script>::new();
 
@@ -1561,7 +1609,7 @@ fn main() -> ExitCode {
                     &mut optlen,
                 ) == -1
             } {
-                println!("Could not find a UNIX socket.");
+                info();
                 return ExitCode::FAILURE;
             }
 
@@ -1580,12 +1628,12 @@ fn main() -> ExitCode {
                 let mut data = WSADATA::default();
                 let result = WSAStartup(0x0202, &mut data);
                 if result != 0 {
-                    println!("WSAStartup failed: {}", result);
+                    eprintln!("WSAStartup failed: {}", result);
                     return ExitCode::FAILURE;
                 }
 
                 let Ok(handle) = GetStdHandle(STD_INPUT_HANDLE) else {
-                    println!("Could not get a standard input handle.");
+                    eprintln!("Could not get a standard input handle.");
                     return ExitCode::FAILURE;
                 };
 
@@ -1593,7 +1641,7 @@ fn main() -> ExitCode {
                 if WSAEnumNetworkEvents(SOCKET(handle.0 as usize), None, &mut events)
                     == SOCKET_ERROR
                 {
-                    println!("Could not find a TCP socket in standard input.");
+                    info();
                     return ExitCode::FAILURE;
                 }
 
