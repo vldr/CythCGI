@@ -586,16 +586,13 @@ void jsonEncode(char[] buffer, any value)
         buffer.push('{')
         bool first = true
 
-        for bool used in o.value.used
-            if not used
-                continue
-
+        for int index in o.value
             if not first
                 buffer.push(',')
 
-            jsonEncodeString(buffer, o.value.keys[it])
+            jsonEncodeString(buffer, o.value.keys[index])
             buffer.push(':')
-            jsonEncode(buffer, o.value.values[it])
+            jsonEncode(buffer, o.value.values[index])
 
             first = false
 
@@ -623,6 +620,24 @@ class Map<K, V>
 
     V __get__(K key)
         return get(key)
+
+    MapIterator __begin__()
+        MapIterator iterator = MapIterator()
+        while iterator.index < used.length and not used[iterator.index]
+            iterator.index += 1
+        return iterator
+
+    bool __hasNext__(MapIterator iterator)
+        return iterator.index < used.length
+
+    MapIterator __next__(MapIterator iterator)
+        iterator.index += 1
+        while iterator.index < used.length and not used[iterator.index]
+            iterator.index += 1
+        return iterator
+
+    int __get__(MapIterator iterator)
+        return iterator.index
 
     int hash(K key)
         int h = key.hash() % bucketCount
@@ -719,6 +734,9 @@ class Map<K, V>
             index = (index + 1) % bucketCount
             if index == start
                 return
+
+class MapIterator
+    int index
 "#;
 
 static mut CONTEXT: *mut Context = ptr::null_mut();

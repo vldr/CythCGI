@@ -1296,6 +1296,217 @@ static Function* generate_array_reserve_function(CyVM* vm, DataType data_type)
   return function;
 }
 
+static void generate_begin_intrinsic(CyVM* vm, MIR_reg_t dest)
+{
+  MIR_append_insn(
+    vm->ctx, vm->function,
+    MIR_new_insn(vm->ctx, MIR_MOV, MIR_new_reg_op(vm->ctx, dest), MIR_new_int_op(vm->ctx, 0)));
+}
+
+static Function* generate_begin_function(CyVM* vm)
+{
+  const char* name = "string/array.begin";
+
+  Function* function = map_get_function(&vm->functions, name);
+  if (!function)
+  {
+    MIR_type_t return_type = data_type_to_mir_type(DATA_TYPE(TYPE_INTEGER));
+    MIR_var_t params[] = {
+      { .name = "ptr", .size = 0, .type = data_type_to_mir_type(DATA_TYPE(TYPE_ARRAY)) },
+    };
+
+    MIR_item_t previous_function = vm->function;
+    MIR_func_t previous_func = MIR_get_curr_func(vm->ctx);
+    MIR_set_curr_func(vm->ctx, NULL);
+
+    function = ALLOC(Function);
+    function->proto =
+      MIR_new_proto_arr(vm->ctx, memory_sprintf("%s.proto", name), return_type != MIR_T_UNDEF,
+                        &return_type, sizeof(params) / sizeof_ptr(params), params);
+    function->func = MIR_new_func_arr(vm->ctx, name, return_type != MIR_T_UNDEF, &return_type,
+                                      sizeof(params) / sizeof_ptr(params), params);
+
+    vm->function = function->func;
+
+    MIR_reg_t result = _MIR_new_temp_reg(vm->ctx, MIR_T_I64, vm->function->u.func);
+
+    {
+      generate_begin_intrinsic(vm, result);
+
+      MIR_append_insn(vm->ctx, vm->function,
+                      MIR_new_ret_insn(vm->ctx, 1, MIR_new_reg_op(vm->ctx, result)));
+    }
+
+    map_put_function(&vm->functions, name, function);
+
+    MIR_finish_func(vm->ctx);
+    MIR_set_curr_func(vm->ctx, previous_func);
+    vm->function = previous_function;
+  }
+
+  return function;
+}
+
+static void generate_next_intrinsic(CyVM* vm, MIR_reg_t dest, MIR_reg_t argument)
+{
+  MIR_append_insn(vm->ctx, vm->function,
+                  MIR_new_insn(vm->ctx, MIR_ADDS, MIR_new_reg_op(vm->ctx, dest),
+                               MIR_new_reg_op(vm->ctx, argument), MIR_new_int_op(vm->ctx, 1)));
+}
+
+static Function* generate_next_function(CyVM* vm)
+{
+  const char* name = "string/array.next";
+
+  Function* function = map_get_function(&vm->functions, name);
+  if (!function)
+  {
+    MIR_type_t return_type = data_type_to_mir_type(DATA_TYPE(TYPE_INTEGER));
+    MIR_var_t params[] = {
+      { .name = "ptr", .size = 0, .type = data_type_to_mir_type(DATA_TYPE(TYPE_ARRAY)) },
+      { .name = "input", .size = 0, .type = data_type_to_mir_type(DATA_TYPE(TYPE_INTEGER)) },
+    };
+
+    MIR_item_t previous_function = vm->function;
+    MIR_func_t previous_func = MIR_get_curr_func(vm->ctx);
+    MIR_set_curr_func(vm->ctx, NULL);
+
+    function = ALLOC(Function);
+    function->proto =
+      MIR_new_proto_arr(vm->ctx, memory_sprintf("%s.proto", name), return_type != MIR_T_UNDEF,
+                        &return_type, sizeof(params) / sizeof_ptr(params), params);
+    function->func = MIR_new_func_arr(vm->ctx, name, return_type != MIR_T_UNDEF, &return_type,
+                                      sizeof(params) / sizeof_ptr(params), params);
+
+    vm->function = function->func;
+
+    MIR_reg_t input = MIR_reg(vm->ctx, "input", vm->function->u.func);
+
+    {
+      generate_next_intrinsic(vm, input, input);
+
+      MIR_append_insn(vm->ctx, vm->function,
+                      MIR_new_ret_insn(vm->ctx, 1, MIR_new_reg_op(vm->ctx, input)));
+    }
+
+    map_put_function(&vm->functions, name, function);
+
+    MIR_finish_func(vm->ctx);
+    MIR_set_curr_func(vm->ctx, previous_func);
+    vm->function = previous_function;
+  }
+
+  return function;
+}
+
+static void generate_array_has_next_intrinsic(CyVM* vm, MIR_reg_t dest, MIR_reg_t ptr,
+                                              MIR_reg_t index)
+{
+  MIR_append_insn(vm->ctx, vm->function,
+                  MIR_new_insn(vm->ctx, MIR_LTS, MIR_new_reg_op(vm->ctx, dest),
+                               MIR_new_reg_op(vm->ctx, index), generate_array_length_op(vm, ptr)));
+}
+
+static Function* generate_array_has_next_function(CyVM* vm)
+{
+  const char* name = "array.hasNext";
+
+  Function* function = map_get_function(&vm->functions, name);
+  if (!function)
+  {
+    MIR_type_t return_type = data_type_to_mir_type(DATA_TYPE(TYPE_BOOL));
+    MIR_var_t params[] = {
+      { .name = "ptr", .size = 0, .type = data_type_to_mir_type(DATA_TYPE(TYPE_ARRAY)) },
+      { .name = "input", .size = 0, .type = data_type_to_mir_type(DATA_TYPE(TYPE_INTEGER)) },
+    };
+
+    MIR_item_t previous_function = vm->function;
+    MIR_func_t previous_func = MIR_get_curr_func(vm->ctx);
+    MIR_set_curr_func(vm->ctx, NULL);
+
+    function = ALLOC(Function);
+    function->proto =
+      MIR_new_proto_arr(vm->ctx, memory_sprintf("%s.proto", name), return_type != MIR_T_UNDEF,
+                        &return_type, sizeof(params) / sizeof_ptr(params), params);
+    function->func = MIR_new_func_arr(vm->ctx, name, return_type != MIR_T_UNDEF, &return_type,
+                                      sizeof(params) / sizeof_ptr(params), params);
+
+    vm->function = function->func;
+
+    MIR_reg_t ptr = MIR_reg(vm->ctx, "ptr", vm->function->u.func);
+    MIR_reg_t input = MIR_reg(vm->ctx, "input", vm->function->u.func);
+
+    {
+      generate_array_has_next_intrinsic(vm, input, ptr, input);
+
+      MIR_append_insn(vm->ctx, vm->function,
+                      MIR_new_ret_insn(vm->ctx, 1, MIR_new_reg_op(vm->ctx, input)));
+    }
+
+    map_put_function(&vm->functions, name, function);
+
+    MIR_finish_func(vm->ctx);
+    MIR_set_curr_func(vm->ctx, previous_func);
+    vm->function = previous_function;
+  }
+
+  return function;
+}
+
+static void generate_string_has_next_intrinsic(CyVM* vm, MIR_reg_t dest, MIR_reg_t ptr,
+                                               MIR_reg_t index)
+{
+  MIR_append_insn(vm->ctx, vm->function,
+                  MIR_new_insn(vm->ctx, MIR_LTS, MIR_new_reg_op(vm->ctx, dest),
+                               MIR_new_reg_op(vm->ctx, index), generate_string_length_op(vm, ptr)));
+}
+
+static Function* generate_string_has_next_function(CyVM* vm)
+{
+  const char* name = "string.hasNext";
+
+  Function* function = map_get_function(&vm->functions, name);
+  if (!function)
+  {
+    MIR_type_t return_type = data_type_to_mir_type(DATA_TYPE(TYPE_BOOL));
+    MIR_var_t params[] = {
+      { .name = "ptr", .size = 0, .type = data_type_to_mir_type(DATA_TYPE(TYPE_STRING)) },
+      { .name = "input", .size = 0, .type = data_type_to_mir_type(DATA_TYPE(TYPE_INTEGER)) },
+    };
+
+    MIR_item_t previous_function = vm->function;
+    MIR_func_t previous_func = MIR_get_curr_func(vm->ctx);
+    MIR_set_curr_func(vm->ctx, NULL);
+
+    function = ALLOC(Function);
+    function->proto =
+      MIR_new_proto_arr(vm->ctx, memory_sprintf("%s.proto", name), return_type != MIR_T_UNDEF,
+                        &return_type, sizeof(params) / sizeof_ptr(params), params);
+    function->func = MIR_new_func_arr(vm->ctx, name, return_type != MIR_T_UNDEF, &return_type,
+                                      sizeof(params) / sizeof_ptr(params), params);
+
+    vm->function = function->func;
+
+    MIR_reg_t ptr = MIR_reg(vm->ctx, "ptr", vm->function->u.func);
+    MIR_reg_t input = MIR_reg(vm->ctx, "input", vm->function->u.func);
+
+    {
+      generate_string_has_next_intrinsic(vm, input, ptr, input);
+
+      MIR_append_insn(vm->ctx, vm->function,
+                      MIR_new_ret_insn(vm->ctx, 1, MIR_new_reg_op(vm->ctx, input)));
+    }
+
+    map_put_function(&vm->functions, name, function);
+
+    MIR_finish_func(vm->ctx);
+    MIR_set_curr_func(vm->ctx, previous_func);
+    vm->function = previous_function;
+  }
+
+  return function;
+}
+
 static Function* generate_int_hash_function(CyVM* vm)
 {
   const char* name = "int.hash";
@@ -1338,6 +1549,13 @@ static Function* generate_int_hash_function(CyVM* vm)
   return function;
 }
 
+static void generate_float_hash_intrinsic(CyVM* vm, MIR_reg_t dest, MIR_reg_t argument)
+{
+  MIR_append_insn(vm->ctx, vm->function,
+                  MIR_new_insn(vm->ctx, MIR_F2U, MIR_new_reg_op(vm->ctx, dest),
+                               MIR_new_reg_op(vm->ctx, argument)));
+}
+
 static Function* generate_float_hash_function(CyVM* vm)
 {
   const char* name = "float.hash";
@@ -1367,9 +1585,7 @@ static Function* generate_float_hash_function(CyVM* vm)
     MIR_reg_t result = _MIR_new_temp_reg(vm->ctx, MIR_T_I64, vm->function->u.func);
 
     {
-      MIR_append_insn(vm->ctx, vm->function,
-                      MIR_new_insn(vm->ctx, MIR_F2U, MIR_new_reg_op(vm->ctx, result),
-                                   MIR_new_reg_op(vm->ctx, input)));
+      generate_float_hash_intrinsic(vm, result, input);
 
       MIR_append_insn(vm->ctx, vm->function,
                       MIR_new_ret_insn(vm->ctx, 1, MIR_new_reg_op(vm->ctx, result)));
@@ -1383,6 +1599,13 @@ static Function* generate_float_hash_function(CyVM* vm)
   }
 
   return function;
+}
+
+static void generate_float_sqrt_intrinsic(CyVM* vm, MIR_reg_t dest, MIR_reg_t argument)
+{
+  MIR_append_insn(vm->ctx, vm->function,
+                  MIR_new_insn(vm->ctx, MIR_FSQRT, MIR_new_reg_op(vm->ctx, dest),
+                               MIR_new_reg_op(vm->ctx, argument)));
 }
 
 static Function* generate_float_sqrt_function(CyVM* vm)
@@ -1413,9 +1636,7 @@ static Function* generate_float_sqrt_function(CyVM* vm)
     MIR_reg_t input = MIR_reg(vm->ctx, "input", vm->function->u.func);
 
     {
-      MIR_append_insn(vm->ctx, vm->function,
-                      MIR_new_insn(vm->ctx, MIR_FSQRT, MIR_new_reg_op(vm->ctx, input),
-                                   MIR_new_reg_op(vm->ctx, input)));
+      generate_float_sqrt_intrinsic(vm, input, input);
 
       MIR_append_insn(vm->ctx, vm->function,
                       MIR_new_ret_insn(vm->ctx, 1, MIR_new_reg_op(vm->ctx, input)));
@@ -2244,29 +2465,6 @@ static void generate_default_initialization(CyVM* vm, MIR_reg_t dest, DataType d
   }
 }
 
-static void generate_float_sqrt_intrinsic(CyVM* vm, MIR_reg_t dest, Expr* argument)
-{
-  generate_expression(vm, dest, argument);
-  MIR_append_insn(
-    vm->ctx, vm->function,
-    MIR_new_insn(vm->ctx, MIR_FSQRT, MIR_new_reg_op(vm->ctx, dest), MIR_new_reg_op(vm->ctx, dest)));
-}
-
-static void generate_int_hash_intrinsic(CyVM* vm, MIR_reg_t dest, Expr* argument)
-{
-  generate_expression(vm, dest, argument);
-}
-
-static void generate_float_hash_intrinsic(CyVM* vm, MIR_reg_t dest, Expr* argument)
-{
-  MIR_reg_t input = _MIR_new_temp_reg(vm->ctx, MIR_T_F, vm->function->u.func);
-  generate_expression(vm, input, argument);
-
-  MIR_append_insn(
-    vm->ctx, vm->function,
-    MIR_new_insn(vm->ctx, MIR_F2U, MIR_new_reg_op(vm->ctx, dest), MIR_new_reg_op(vm->ctx, input)));
-}
-
 static bool generate_function_internal_intrinsic(CyVM* vm, MIR_reg_t dest, CallExpr* expression)
 {
   DataType data_type = expression->callee_data_type;
@@ -2275,17 +2473,61 @@ static bool generate_function_internal_intrinsic(CyVM* vm, MIR_reg_t dest, CallE
   const char* name = data_type.function_internal.name;
   if (strcmp(name, "float.sqrt") == 0)
   {
-    generate_float_sqrt_intrinsic(vm, dest, array_at(&expression->arguments, 0));
+    generate_expression(vm, dest, array_at(&expression->arguments, 0));
+    generate_float_sqrt_intrinsic(vm, dest, dest);
+
     return true;
   }
   else if (strcmp(name, "int.hash") == 0)
   {
-    generate_int_hash_intrinsic(vm, dest, array_at(&expression->arguments, 0));
+    generate_expression(vm, dest, array_at(&expression->arguments, 0));
+
     return true;
   }
   else if (strcmp(name, "float.hash") == 0)
   {
-    generate_float_hash_intrinsic(vm, dest, array_at(&expression->arguments, 0));
+    MIR_reg_t argument = _MIR_new_temp_reg(vm->ctx, MIR_T_F, vm->function->u.func);
+    generate_expression(vm, argument, array_at(&expression->arguments, 0));
+    generate_float_hash_intrinsic(vm, dest, argument);
+
+    return true;
+  }
+
+  else if (strcmp(name, "array.begin") == 0 || strcmp(name, "string.begin") == 0)
+  {
+    generate_begin_intrinsic(vm, dest);
+
+    return true;
+  }
+  else if (strcmp(name, "array.next") == 0 || strcmp(name, "string.next") == 0)
+  {
+    generate_expression(vm, dest, array_at(&expression->arguments, 1));
+    generate_next_intrinsic(vm, dest, dest);
+
+    return true;
+  }
+  else if (strcmp(name, "array.hasNext") == 0)
+  {
+    MIR_reg_t ptr = _MIR_new_temp_reg(vm->ctx, MIR_T_I64, vm->function->u.func);
+    generate_expression(vm, ptr, array_at(&expression->arguments, 0));
+
+    MIR_reg_t index = _MIR_new_temp_reg(vm->ctx, MIR_T_I64, vm->function->u.func);
+    generate_expression(vm, index, array_at(&expression->arguments, 1));
+
+    generate_array_has_next_intrinsic(vm, dest, ptr, index);
+
+    return true;
+  }
+  else if (strcmp(name, "string.hasNext") == 0)
+  {
+    MIR_reg_t ptr = _MIR_new_temp_reg(vm->ctx, MIR_T_I64, vm->function->u.func);
+    generate_expression(vm, ptr, array_at(&expression->arguments, 0));
+
+    MIR_reg_t index = _MIR_new_temp_reg(vm->ctx, MIR_T_I64, vm->function->u.func);
+    generate_expression(vm, index, array_at(&expression->arguments, 1));
+
+    generate_string_has_next_intrinsic(vm, dest, ptr, index);
+
     return true;
   }
 
@@ -2297,7 +2539,17 @@ static Function* generate_function_internal(CyVM* vm, DataType data_type)
   assert(data_type.type == TYPE_FUNCTION_INTERNAL);
 
   const char* name = data_type.function_internal.name;
-  if (strcmp(name, "array.push") == 0)
+
+  if (strcmp(name, "array.begin") == 0 || strcmp(name, "string.begin") == 0)
+    return generate_begin_function(vm);
+  else if (strcmp(name, "array.next") == 0 || strcmp(name, "string.next") == 0)
+    return generate_next_function(vm);
+  else if (strcmp(name, "array.hasNext") == 0)
+    return generate_array_has_next_function(vm);
+  else if (strcmp(name, "string.hasNext") == 0)
+    return generate_string_has_next_function(vm);
+
+  else if (strcmp(name, "array.push") == 0)
     return generate_array_push_function(vm,
                                         array_at(&data_type.function_internal.parameter_types, 0),
                                         array_at(&data_type.function_internal.parameter_types, 1));
@@ -2470,7 +2722,7 @@ static void generate_binary_expression(CyVM* vm, MIR_reg_t dest, BinaryExpr* exp
   {
   case TOKEN_PLUS:
     if (data_type.type == TYPE_INTEGER || data_type.type == TYPE_CHAR)
-      op = MIR_ADD;
+      op = MIR_ADDS;
     else if (data_type.type == TYPE_FLOAT)
       op = MIR_FADD;
     else if (data_type.type == TYPE_STRING)
@@ -2537,7 +2789,7 @@ static void generate_binary_expression(CyVM* vm, MIR_reg_t dest, BinaryExpr* exp
     break;
   case TOKEN_MINUS:
     if (data_type.type == TYPE_INTEGER || data_type.type == TYPE_CHAR)
-      op = MIR_SUB;
+      op = MIR_SUBS;
     else if (data_type.type == TYPE_FLOAT)
       op = MIR_FSUB;
     else if (data_type.type == TYPE_OBJECT)
@@ -3578,9 +3830,9 @@ static void generate_cast_expression(CyVM* vm, MIR_reg_t dest, CastExpr* express
   if (expression->to_data_type.type == TYPE_FLOAT &&
       expression->from_data_type.type == TYPE_INTEGER)
   {
-    MIR_append_insn(
-      vm->ctx, vm->function,
-      MIR_new_insn(vm->ctx, MIR_I2F, MIR_new_reg_op(vm->ctx, dest), MIR_new_reg_op(vm->ctx, expr)));
+    MIR_append_insn(vm->ctx, vm->function,
+                    MIR_new_insn(vm->ctx, MIR_I2FS, MIR_new_reg_op(vm->ctx, dest),
+                                 MIR_new_reg_op(vm->ctx, expr)));
     return;
   }
   else if (expression->to_data_type.type == TYPE_STRING)
@@ -3667,7 +3919,7 @@ static void generate_cast_expression(CyVM* vm, MIR_reg_t dest, CastExpr* express
     case TYPE_BOOL:
     case TYPE_INTEGER:
       MIR_append_insn(vm->ctx, vm->function,
-                      MIR_new_insn(vm->ctx, MIR_I2F, MIR_new_reg_op(vm->ctx, dest),
+                      MIR_new_insn(vm->ctx, MIR_I2FS, MIR_new_reg_op(vm->ctx, dest),
                                    MIR_new_reg_op(vm->ctx, expr)));
       return;
     default:
@@ -3699,7 +3951,7 @@ static void generate_cast_expression(CyVM* vm, MIR_reg_t dest, CastExpr* express
       return;
     case TYPE_FLOAT:
       MIR_append_insn(vm->ctx, vm->function,
-                      MIR_new_insn(vm->ctx, MIR_F2I, MIR_new_reg_op(vm->ctx, dest),
+                      MIR_new_insn(vm->ctx, MIR_F2IS, MIR_new_reg_op(vm->ctx, dest),
                                    MIR_new_reg_op(vm->ctx, expr)));
       return;
     default:
@@ -5197,8 +5449,9 @@ int cyth_compile(CyVM* vm)
   MIR_gen_init(vm->ctx);
   MIR_gen_set_optimize_level(vm->ctx, 3);
   MIR_link(vm->ctx, MIR_set_gen_interface, NULL);
+  MIR_gen(vm->ctx, vm->function);
 
-  vm->start = (Start)MIR_gen(vm->ctx, vm->function);
+  vm->start = (Start)(uintptr_t)vm->function->u.func->machine_code;
 
   if (vm->logging)
     MIR_output(vm->ctx, stdout);
@@ -5220,7 +5473,9 @@ int cyth_compile(CyVM* vm)
     GC_add_roots(item->addr, (char*)item->addr + sizeof(uintptr_t));
   }
 
+  MIR_gen_finish(vm->ctx);
   memory_reset();
+
   return result;
 }
 
@@ -5247,7 +5502,6 @@ void cyth_destroy(CyVM* vm)
     GC_remove_roots(item->addr, (char*)item->addr + sizeof(uintptr_t));
   }
 
-  MIR_gen_finish(vm->ctx);
   MIR_finish(vm->ctx);
   free(vm);
 }
@@ -5360,7 +5614,7 @@ uintptr_t cyth_get_function(CyVM* vm, const char* name)
       continue;
 
     if (strcmp(name, item->u.func->name) == 0)
-      return MIR_gen(vm->ctx, item);
+      return (uintptr_t)item->u.func->machine_code;
   }
 
   return 0;
