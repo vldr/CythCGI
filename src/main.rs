@@ -112,7 +112,7 @@ unsafe extern "C" {
     ) -> c_int;
     fn cyth_load_string(vm: *const c_void, filename: *const c_char, source: *const c_char)
     -> c_int;
-    fn cyth_get_function(vm: *const c_void, name: *const c_char) -> *const c_void;
+    fn cyth_get_function_unsafe(vm: *const c_void, name: *const c_char) -> *const c_void;
     fn cyth_compile(vm: *const c_void) -> c_int;
     fn cyth_run(vm: *const c_void);
     fn cyth_destroy(vm: *const c_void);
@@ -1538,31 +1538,31 @@ fn request(mut req: Request, context: &mut Context, scripts: &mut HashMap<String
                 modified: metadata.modified().unwrap(),
                 text: text.into(),
                 functions: Functions {
-                    json_number: std::mem::transmute(cyth_get_function(
+                    json_number: std::mem::transmute(cyth_get_function_unsafe(
                         vm,
                         c"jsonNumber.any(float)".as_ptr(),
                     )),
-                    json_bool: std::mem::transmute(cyth_get_function(
+                    json_bool: std::mem::transmute(cyth_get_function_unsafe(
                         vm,
                         c"jsonBool.any(bool)".as_ptr(),
                     )),
-                    json_string: std::mem::transmute(cyth_get_function(
+                    json_string: std::mem::transmute(cyth_get_function_unsafe(
                         vm,
                         c"jsonString.any(string)".as_ptr(),
                     )),
-                    json_array: std::mem::transmute(cyth_get_function(
+                    json_array: std::mem::transmute(cyth_get_function_unsafe(
                         vm,
                         c"jsonArray.any(any[])".as_ptr(),
                     )),
-                    json_object: std::mem::transmute(cyth_get_function(
+                    json_object: std::mem::transmute(cyth_get_function_unsafe(
                         vm,
                         c"jsonObject.any(Map<string, any>)".as_ptr(),
                     )),
-                    map_init: std::mem::transmute(cyth_get_function(
+                    map_init: std::mem::transmute(cyth_get_function_unsafe(
                         vm,
                         c"Map<string, any>".as_ptr(),
                     )),
-                    map_set: std::mem::transmute(cyth_get_function(
+                    map_set: std::mem::transmute(cyth_get_function_unsafe(
                         vm,
                         c"Map<string, any>.__set__.void(string, any)".as_ptr(),
                     )),

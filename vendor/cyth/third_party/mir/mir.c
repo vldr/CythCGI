@@ -16,6 +16,15 @@ DEF_VARR (char);
 DEF_VARR (uint8_t);
 DEF_VARR (MIR_proto_t);
 DEF_VARR (MIR_location_t);
+DEF_HTAB (MIR_location_map_t)
+
+static htab_hash_t location_map_hash (MIR_location_map_t map, void *arg) {
+  return map.key;
+}
+
+static int location_map_eq (MIR_location_map_t map1, MIR_location_map_t map2, void *arg) {
+  return map1.key == map2.key;
+}
 
 struct gen_ctx;
 struct c2mir_ctx;
@@ -724,6 +733,8 @@ static void init_module (MIR_context_t ctx, MIR_module_t m, const char *name) {
   m->data = NULL;
   m->last_temp_item_num = 0;
   m->name = get_ctx_str (ctx, name);
+  m->thunk_addr = NULL;
+  m->thunk_size = 0;
   DLIST_INIT (MIR_item_t, m->items);
 }
 
@@ -1940,6 +1951,7 @@ static void link_module_lrefs (MIR_context_t ctx, MIR_module_t m) {
 
 void MIR_load_module (MIR_context_t ctx, MIR_module_t m) {
   int lref_p = FALSE;
+  int thunks = 0;
   mir_assert (m != NULL);
   for (MIR_item_t item = DLIST_HEAD (MIR_item_t, m->items); item != NULL;
        item = DLIST_NEXT (MIR_item_t, item)) {
@@ -1952,12 +1964,8 @@ void MIR_load_module (MIR_context_t ctx, MIR_module_t m) {
       item = load_bss_data_section (ctx, item, FALSE);
     } else if (item->item_type == MIR_func_item) {
       if (item->addr == NULL) {
-        item->addr = _MIR_get_thunk (ctx);
-#if defined(MIR_DEBUG)
-        fprintf (stderr, "%016llx: %s\n", (unsigned long long) item->addr, item->u.func->name);
-#endif
+        thunks++;
       }
-      _MIR_redirect_thunk (ctx, item->addr, undefined_interface);
     }
     if (first_item->export_p) { /* update global item table */
       mir_assert (first_item->item_type != MIR_export_item
@@ -1975,6 +1983,26 @@ void MIR_load_module (MIR_context_t ctx, MIR_module_t m) {
                                   item->u.func->name);
     }
   }
+
+  assert(m->thunk_addr == NULL);
+  assert(m->thunk_size == 0);
+
+  uint8_t* thunk_addr = m->thunk_addr = _MIR_get_thunk (ctx, thunks, &m->thunk_size);
+  for (MIR_item_t item = DLIST_HEAD (MIR_item_t, m->items); item != NULL;
+       item = DLIST_NEXT (MIR_item_t, item)) {
+    if (item->item_type == MIR_func_item) {
+      if (item->addr == NULL) {
+        item->addr = thunk_addr;
+        thunk_addr += 16;
+
+#if defined(MIR_DEBUG)
+        fprintf (stderr, "%016llx: %s\n", (unsigned long long) item->addr, item->u.func->name);
+#endif
+      }
+      _MIR_redirect_thunk (ctx, item->addr, undefined_interface);
+    }
+  }
+
   if (lref_p) link_module_lrefs (ctx, m);
   VARR_PUSH (MIR_module_t, modules_to_link, m);
 }
@@ -4063,6 +4091,9 @@ static void process_inlines (MIR_context_t ctx, MIR_item_t func_item) {
   MIR_func_t func, called_func;
   size_t original_func_insns_num, func_insns_num, leaf_func_insns_num, called_func_insns_num;
 
+  HTAB(MIR_location_map_t)* location_map;
+  HTAB_CREATE (MIR_location_map_t, location_map, ctx->alloc, 32, location_map_hash, location_map_eq, NULL);
+  
   mir_assert (func_item->item_type == MIR_func_item);
   vn_empty (ctx);
   func = func_item->u.func;
@@ -4185,8 +4216,9 @@ static void process_inlines (MIR_context_t ctx, MIR_item_t func_item) {
     VARR_TRUNC (MIR_insn_t, temp_insns, 0);
     VARR_TRUNC (MIR_insn_t, labels, 0);
     VARR_TRUNC (uint8_t, temp_data, 0);
+    HTAB_CLEAR(MIR_location_map_t, location_map);
     stop_insn = NULL;
-    
+
     VARR_PUSH(MIR_location_t, locations, call->location);
     int next_location = VARR_LENGTH(MIR_location_t, locations);
 
@@ -4199,10 +4231,34 @@ static void process_inlines (MIR_context_t ctx, MIR_item_t func_item) {
 
         /* copy debug info during inlining */
         if (call) {
-          if (new_insn->location.line == 0 && new_insn->location.column == 0) 
+          if (new_insn->location.line == 0 && new_insn->location.column == 0) {
             new_insn->location = call->location;
-          else
+          } else if (new_insn->location.next == 0) {
             new_insn->location.next = next_location;
+          } else {
+            MIR_location_t* location = &new_insn->location;
+            while (location) {
+              MIR_location_map_t mapping = { .key = location->next };
+
+              if (location->next == 0) {
+                location->next = next_location;
+                break;
+              } else if (HTAB_DO (MIR_location_map_t, location_map, mapping, HTAB_FIND, mapping)) {
+                location->next = mapping.value;
+                break;
+              } else {
+                VARR_PUSH(MIR_location_t, locations, *MIR_get_location(ctx, location->next));
+                int next_location = VARR_LENGTH(MIR_location_t, locations);
+
+                mapping.value = next_location;
+                HTAB_DO (MIR_location_map_t, location_map, mapping, HTAB_INSERT, mapping);
+
+                location->next = next_location;
+              }
+
+              location = MIR_get_location(ctx, location->next);
+            }
+          }
         }
 
         change_inline_insn_regs (ctx, new_insn);
@@ -4220,10 +4276,34 @@ static void process_inlines (MIR_context_t ctx, MIR_item_t func_item) {
 
       /* copy debug info during inlining */
       if (call) {
-        if (new_insn->location.line == 0 && new_insn->location.column == 0) 
+        if (new_insn->location.line == 0 && new_insn->location.column == 0) {
           new_insn->location = call->location;
-        else
+        } else if (new_insn->location.next == 0) {
           new_insn->location.next = next_location;
+        } else {
+          MIR_location_t* location = &new_insn->location;
+          while (location) {
+            MIR_location_map_t mapping = { .key = location->next };
+
+            if (location->next == 0) {
+              location->next = next_location;
+              break;
+            } else if (HTAB_DO (MIR_location_map_t, location_map, mapping, HTAB_FIND, mapping)) {
+              location->next = mapping.value;
+              break;
+            } else {
+              VARR_PUSH(MIR_location_t, locations, *MIR_get_location(ctx, location->next));
+              int next_location = VARR_LENGTH(MIR_location_t, locations);
+
+              mapping.value = next_location;
+              HTAB_DO (MIR_location_map_t, location_map, mapping, HTAB_INSERT, mapping);
+
+              location->next = next_location;
+            }
+
+            location = MIR_get_location(ctx, location->next);
+          }
+        }
       }
 
       /* va insns are possible here as va_list can be passed as arg */
@@ -4315,6 +4395,8 @@ static void process_inlines (MIR_context_t ctx, MIR_item_t func_item) {
     MIR_append_insn (ctx, func_item, insn);
   }
   if (curr_label_num < new_label_num) curr_label_num = new_label_num;
+
+  HTAB_DESTROY(MIR_location_map_t, location_map);
 }
 
 /* New Page */
@@ -4496,8 +4578,10 @@ static uint8_t *add_code (MIR_context_t ctx MIR_UNUSED, code_holder_t *ch_ptr, c
   MIR_code_reloc_t reloc;
   reloc.offset = 0;
   reloc.value = code;
-  _MIR_set_code (ctx->code_alloc, (size_t) ch_ptr->start, ch_ptr->bound - ch_ptr->start, mem, 1, &reloc, code_len);
-  _MIR_flush_code_cache (mem, ch_ptr->free);
+  if (code) {
+    _MIR_set_code (ctx->code_alloc, (size_t) ch_ptr->start, ch_ptr->bound - ch_ptr->start, mem, 1, &reloc, code_len);
+    _MIR_flush_code_cache (mem, ch_ptr->free);
+  }
   return mem;
 }
 
