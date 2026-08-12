@@ -3138,6 +3138,23 @@ static const char* generate_array_to_string_function(DataType this_data_type)
 #undef CONSTANT
 }
 
+static const char* generate_panic_function(void)
+{
+  const char* name = "panic";
+
+  if (!BinaryenGetFunction(codegen.module, name))
+  {
+    BinaryenType params_list[] = { codegen.string_type };
+    BinaryenType params =
+      BinaryenTypeCreate(params_list, sizeof(params_list) / sizeof_ptr(params_list));
+
+    BinaryenAddFunction(codegen.module, name, params, BinaryenTypeNone(), NULL, 0,
+                        BinaryenUnreachable(codegen.module));
+  }
+
+  return name;
+}
+
 static const char* generate_int_hash_function(void)
 {
   const char* name = "int.hash";
@@ -3394,7 +3411,7 @@ static const char* generate_array_has_next_function(DataType this_data_type)
 
   BinaryenType this_type = data_type_to_binaryen_type(this_data_type);
 
-  const char* name = memory_sprintf("array.hasNext.%d", this_type);
+  const char* name = memory_sprintf("array.has_next.%d", this_type);
 
   if (!BinaryenGetFunction(codegen.module, name))
   {
@@ -3430,7 +3447,7 @@ static const char* generate_string_has_next_function(DataType this_data_type)
 
   BinaryenType this_type = data_type_to_binaryen_type(this_data_type);
 
-  const char* name = memory_sprintf("string.hasNext.%d", this_type);
+  const char* name = memory_sprintf("string.has_next.%d", this_type);
 
   if (!BinaryenGetFunction(codegen.module, name))
   {
@@ -3488,13 +3505,15 @@ static const char* generate_function_internal(DataType data_type)
     return generate_begin_function(array_at(&data_type.function_internal.parameter_types, 0));
   else if (strcmp(name, "array.next") == 0 || strcmp(name, "string.next") == 0)
     return generate_next_function(array_at(&data_type.function_internal.parameter_types, 0));
-  else if (strcmp(name, "array.hasNext") == 0)
+  else if (strcmp(name, "array.has_next") == 0)
     return generate_array_has_next_function(
       array_at(&data_type.function_internal.parameter_types, 0));
-  else if (strcmp(name, "string.hasNext") == 0)
+  else if (strcmp(name, "string.has_next") == 0)
     return generate_string_has_next_function(
       array_at(&data_type.function_internal.parameter_types, 0));
 
+  else if (strcmp(name, "panic") == 0)
+    return generate_panic_function();
   else if (strcmp(name, "int.hash") == 0)
     return generate_int_hash_function();
   else if (strcmp(name, "float.sqrt") == 0)

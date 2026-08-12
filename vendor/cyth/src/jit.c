@@ -103,6 +103,14 @@ static CyLongJMP generate_longjmp(void);
 uintptr_t panic_fp;
 CyVM* panic_vm;
 
+#ifdef _WIN32
+PVOID panic_handler;
+#else
+static struct sigaction panic_sigsegv;
+static struct sigaction panic_sigfpe;
+static stack_t panic_sigstack;
+#endif
+
 static void panic(CyVM* vm, const char* what, uintptr_t pc, uintptr_t fp)
 {
   if (vm->panic_callback)
@@ -1207,7 +1215,9 @@ static Function* generate_array_remove_function(CyVM* vm, DataType data_type)
                       MIR_new_insn(vm->ctx, MIR_MOV, MIR_new_reg_op(vm->ctx, array_ptr),
                                    generate_array_data_op(vm, ptr)));
 
-      MIR_reg_t value = _MIR_new_temp_reg(vm->ctx, MIR_T_I64, vm->function->u.func);
+      MIR_reg_t value = _MIR_new_temp_reg(
+        vm->ctx, sized_mir_type_to_mir_type(data_type_to_sized_mir_type(element_data_type)),
+        vm->function->u.func);
 
       MIR_append_insn(
         vm->ctx, vm->function,
@@ -1534,7 +1544,7 @@ static void generate_array_has_next_intrinsic(CyVM* vm, MIR_reg_t dest, MIR_reg_
 
 static Function* generate_array_has_next_function(CyVM* vm)
 {
-  const char* name = "array.hasNext";
+  const char* name = "array.has_next";
 
   Function* function = map_get_function(&vm->functions, name);
   if (!function)
@@ -1588,7 +1598,7 @@ static void generate_string_has_next_intrinsic(CyVM* vm, MIR_reg_t dest, MIR_reg
 
 static Function* generate_string_has_next_function(CyVM* vm)
 {
-  const char* name = "string.hasNext";
+  const char* name = "string.has_next";
 
   Function* function = map_get_function(&vm->functions, name);
   if (!function)
@@ -1765,6 +1775,64 @@ static Function* generate_float_sqrt_function(CyVM* vm)
 
       MIR_append_insn(vm->ctx, vm->function,
                       MIR_new_ret_insn(vm->ctx, 1, MIR_new_reg_op(vm->ctx, input)));
+    }
+
+    map_put_function(&vm->functions, name, function);
+
+    MIR_finish_func(vm->ctx);
+    MIR_set_curr_func(vm->ctx, previous_func);
+    vm->function = previous_function;
+  }
+
+  return function;
+}
+
+static void generate_panic_intrinsic(CyVM* vm, Token token, MIR_reg_t argument)
+{
+  MIR_append_insn(vm->ctx, vm->function,
+                  MIR_new_insn(vm->ctx, MIR_ADD, MIR_new_reg_op(vm->ctx, argument),
+                               MIR_new_reg_op(vm->ctx, argument),
+                               MIR_new_int_op(vm->ctx, sizeof(unsigned int))));
+
+  MIR_append_insn(vm->ctx, vm->function,
+                  generate_debug_info(
+                    vm, token,
+                    MIR_new_call_insn(
+                      vm->ctx, 6, MIR_new_ref_op(vm->ctx, vm->panic.proto),
+                      MIR_new_ref_op(vm->ctx, vm->panic.func),
+                      MIR_new_int_op(vm->ctx, (uint64_t)vm), MIR_new_reg_op(vm->ctx, argument),
+                      MIR_new_int_op(vm->ctx, (uint64_t)0), MIR_new_int_op(vm->ctx, (uint64_t)0))));
+}
+
+static Function* generate_panic_function(CyVM* vm)
+{
+  const char* name = "panic.internal";
+
+  Function* function = map_get_function(&vm->functions, name);
+  if (!function)
+  {
+    MIR_type_t return_type = MIR_T_UNDEF;
+    MIR_var_t params[] = {
+      { .name = "input", .size = 0, .type = data_type_to_mir_type(DATA_TYPE(TYPE_STRING)) },
+    };
+
+    MIR_item_t previous_function = vm->function;
+    MIR_func_t previous_func = MIR_get_curr_func(vm->ctx);
+    MIR_set_curr_func(vm->ctx, NULL);
+
+    function = ALLOC(Function);
+    function->proto =
+      MIR_new_proto_arr(vm->ctx, memory_sprintf("%s.proto", name), return_type != MIR_T_UNDEF,
+                        &return_type, sizeof(params) / sizeof_ptr(params), params);
+    function->func = MIR_new_func_arr(vm->ctx, name, return_type != MIR_T_UNDEF, &return_type,
+                                      sizeof(params) / sizeof_ptr(params), params);
+
+    vm->function = function->func;
+
+    MIR_reg_t input = MIR_reg(vm->ctx, "input", vm->function->u.func);
+
+    {
+      generate_panic_intrinsic(vm, (Token){ 0 }, input);
     }
 
     map_put_function(&vm->functions, name, function);
@@ -2631,7 +2699,7 @@ static bool generate_function_internal_intrinsic(CyVM* vm, MIR_reg_t dest, CallE
 
     return true;
   }
-  else if (strcmp(name, "array.hasNext") == 0)
+  else if (strcmp(name, "array.has_next") == 0)
   {
     MIR_reg_t ptr = _MIR_new_temp_reg(vm->ctx, MIR_T_I64, vm->function->u.func);
     generate_expression(vm, ptr, array_at(&expression->arguments, 0));
@@ -2643,7 +2711,7 @@ static bool generate_function_internal_intrinsic(CyVM* vm, MIR_reg_t dest, CallE
 
     return true;
   }
-  else if (strcmp(name, "string.hasNext") == 0)
+  else if (strcmp(name, "string.has_next") == 0)
   {
     MIR_reg_t ptr = _MIR_new_temp_reg(vm->ctx, MIR_T_I64, vm->function->u.func);
     generate_expression(vm, ptr, array_at(&expression->arguments, 0));
@@ -2652,6 +2720,14 @@ static bool generate_function_internal_intrinsic(CyVM* vm, MIR_reg_t dest, CallE
     generate_expression(vm, index, array_at(&expression->arguments, 1));
 
     generate_string_has_next_intrinsic(vm, dest, ptr, index);
+
+    return true;
+  }
+  else if (strcmp(name, "panic") == 0)
+  {
+    MIR_reg_t argument = _MIR_new_temp_reg(vm->ctx, MIR_T_I64, vm->function->u.func);
+    generate_expression(vm, argument, array_at(&expression->arguments, 0));
+    generate_panic_intrinsic(vm, expression->callee_token, argument);
 
     return true;
   }
@@ -2669,11 +2745,13 @@ static Function* generate_function_internal(CyVM* vm, DataType data_type)
     return generate_begin_function(vm);
   else if (strcmp(name, "array.next") == 0 || strcmp(name, "string.next") == 0)
     return generate_next_function(vm);
-  else if (strcmp(name, "array.hasNext") == 0)
+  else if (strcmp(name, "array.has_next") == 0)
     return generate_array_has_next_function(vm);
-  else if (strcmp(name, "string.hasNext") == 0)
+  else if (strcmp(name, "string.has_next") == 0)
     return generate_string_has_next_function(vm);
 
+  else if (strcmp(name, "panic") == 0)
+    return generate_panic_function(vm);
   else if (strcmp(name, "array.push") == 0)
     return generate_array_push_function(vm,
                                         array_at(&data_type.function_internal.parameter_types, 0),
@@ -5511,6 +5589,29 @@ CyVM* cyth_init(void)
                                       });
   vm->panic.func = MIR_new_import(vm->ctx, "panic");
 
+  MIR_load_external(vm->ctx, "push_jmp", (uintptr_t)push_jmp);
+  vm->push_jmp.proto =
+    MIR_new_proto_arr(vm->ctx, "push_jmp.proto", 1, (MIR_type_t[]){ MIR_T_I64 }, 2,
+                      (MIR_var_t[]){
+                        { .name = "vm", .size = 0, .type = MIR_T_I64 },
+                        { .name = "new", .size = 0, .type = MIR_T_I64 },
+                      });
+  vm->push_jmp.func = MIR_new_import(vm->ctx, "push_jmp");
+
+  MIR_load_external(vm->ctx, "pop_jmp", (uintptr_t)pop_jmp);
+  vm->pop_jmp.proto = MIR_new_proto_arr(vm->ctx, "pop_jmp.proto", 0, NULL, 2,
+                                        (MIR_var_t[]){
+                                          { .name = "vm", .size = 0, .type = MIR_T_I64 },
+                                          { .name = "old", .size = 0, .type = MIR_T_I64 },
+                                        });
+  vm->pop_jmp.func = MIR_new_import(vm->ctx, "pop_jmp");
+
+  MIR_load_external(vm->ctx, "set_jmp", (uintptr_t)generate_setjmp());
+  vm->set_jmp.proto =
+    MIR_new_proto_arr(vm->ctx, "set_jmp.proto", 1, (MIR_type_t[]){ MIR_T_I32 }, 1,
+                      (MIR_var_t[]){ { .name = "buf", .size = 0, .type = MIR_T_I64 } });
+  vm->set_jmp.func = MIR_new_import(vm->ctx, "set_jmp");
+
   MIR_load_external(vm->ctx, "malloc", (uintptr_t)GC_malloc);
   vm->malloc.proto =
     MIR_new_proto_arr(vm->ctx, "malloc.proto", 1, (MIR_type_t[]){ MIR_T_I64 }, 1,
@@ -5545,29 +5646,6 @@ CyVM* cyth_init(void)
                                      { .name = "soruce", .size = 0, .type = MIR_T_I64 },
                                      { .name = "n", .size = 0, .type = MIR_T_I64 } });
   vm->memmove.func = MIR_new_import(vm->ctx, "memmove");
-
-  MIR_load_external(vm->ctx, "push_jmp", (uintptr_t)push_jmp);
-  vm->push_jmp.proto =
-    MIR_new_proto_arr(vm->ctx, "push_jmp.proto", 1, (MIR_type_t[]){ MIR_T_I64 }, 2,
-                      (MIR_var_t[]){
-                        { .name = "vm", .size = 0, .type = MIR_T_I64 },
-                        { .name = "new", .size = 0, .type = MIR_T_I64 },
-                      });
-  vm->push_jmp.func = MIR_new_import(vm->ctx, "push_jmp");
-
-  MIR_load_external(vm->ctx, "pop_jmp", (uintptr_t)pop_jmp);
-  vm->pop_jmp.proto = MIR_new_proto_arr(vm->ctx, "pop_jmp.proto", 0, NULL, 2,
-                                        (MIR_var_t[]){
-                                          { .name = "vm", .size = 0, .type = MIR_T_I64 },
-                                          { .name = "old", .size = 0, .type = MIR_T_I64 },
-                                        });
-  vm->pop_jmp.func = MIR_new_import(vm->ctx, "pop_jmp");
-
-  MIR_load_external(vm->ctx, "set_jmp", (uintptr_t)generate_setjmp());
-  vm->set_jmp.proto =
-    MIR_new_proto_arr(vm->ctx, "set_jmp.proto", 1, (MIR_type_t[]){ MIR_T_I32 }, 1,
-                      (MIR_var_t[]){ { .name = "buf", .size = 0, .type = MIR_T_I64 } });
-  vm->set_jmp.func = MIR_new_import(vm->ctx, "set_jmp");
 
   MIR_load_external(vm->ctx, "string.equals", (uintptr_t)string_equals);
   vm->string_equals.proto =
@@ -5868,7 +5946,7 @@ uintptr_t cyth_get_variable(CyVM* vm, const char* name)
     if (item->item_type != MIR_data_item)
       continue;
 
-    if (strcmp(name, item->u.func->name) == 0)
+    if (strcmp(name, item->u.data->name) == 0)
       return (uintptr_t)item->addr;
   }
 
@@ -5876,7 +5954,6 @@ uintptr_t cyth_get_variable(CyVM* vm, const char* name)
 }
 
 #ifdef _WIN32
-PVOID handler;
 static LONG WINAPI vector_handler(EXCEPTION_POINTERS* ExceptionInfo)
 {
   uintptr_t pc = 0;
@@ -6112,25 +6189,23 @@ static void* push_jmp(CyVM* vm, void* new)
 #ifndef _WIN32
     static char stack[SIGSTKSZ * 2];
     stack_t ss = {
-      .ss_size = SIGSTKSZ * 2,
+      .ss_size = sizeof(stack),
       .ss_sp = stack,
     };
-    sigaltstack(&ss, NULL);
+    sigaltstack(&ss, &panic_sigstack);
 
     struct sigaction sa = { 0 };
     sa.sa_flags = SA_ONSTACK | SA_SIGINFO;
+    sa.sa_sigaction = signal_handler;
     sigemptyset(&sa.sa_mask);
 
-    sa.sa_sigaction = signal_handler;
-    sigaction(SIGSEGV, &sa, NULL);
-
-    sa.sa_sigaction = signal_handler;
-    sigaction(SIGFPE, &sa, NULL);
+    sigaction(SIGSEGV, &sa, &panic_sigsegv);
+    sigaction(SIGFPE, &sa, &panic_sigfpe);
 #else
     ULONG size = 64 * 1024;
     SetThreadStackGuarantee(&size);
 
-    handler = AddVectoredExceptionHandler(1, vector_handler);
+    panic_handler = AddVectoredExceptionHandler(1, vector_handler);
 #endif
 
     panic_fp = (uintptr_t)new;
@@ -6147,11 +6222,12 @@ static void pop_jmp(CyVM* vm, void* old)
   if (!old)
   {
 #ifdef _WIN32
-    RemoveVectoredExceptionHandler(handler);
+    RemoveVectoredExceptionHandler(panic_handler);
     _resetstkoflw();
 #else
-    sigaction(SIGSEGV, NULL, NULL);
-    sigaction(SIGFPE, NULL, NULL);
+    sigaction(SIGSEGV, &panic_sigsegv, NULL);
+    sigaction(SIGFPE, &panic_sigfpe, NULL);
+    sigaltstack(&panic_sigstack, NULL);
 #endif
 
     panic_fp = 0;
