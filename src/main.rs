@@ -544,7 +544,7 @@ void jsonEncodeString(char[] buffer, string value)
         else
             buffer.push(c)
 
-    buffer.push('"')
+    buffer.push('"') 
 
 string jsonEncode(any value)
     char[] buffer
@@ -553,52 +553,46 @@ string jsonEncode(any value)
     return buffer.toString()
 
 void jsonEncode(char[] buffer, any value)
-    if value is JsonBool
-        JsonBool b = (JsonBool)value
+    match value
+        case JsonBool
+            buffer.pushString(value.value ? "true" : "false")
 
-        if b.value
-            buffer.pushString("true")
-        else
-            buffer.pushString("false")
+        case JsonNumber
+            buffer.pushString((string)value.value)
 
-    else if value is JsonNumber
-        JsonNumber n = (JsonNumber)value
-        buffer.pushString((string)n.value)
+        case JsonString
+            jsonEncodeString(buffer, value.value)
 
-    else if value is JsonString
-        JsonString s = (JsonString)value
-        jsonEncodeString(buffer, s.value)
+        case JsonArray
+            buffer.push('[')
 
-    else if value is JsonArray
-        JsonArray a = (JsonArray)value
-        buffer.push('[')
+            for any value in value.value
+                if it > 0
+                    buffer.push(',')
+                
+                jsonEncode(buffer, value)
 
-        for any value in a.value
-            if it > 0
-                buffer.push(',')
-            
-            jsonEncode(buffer, value)
+            buffer.push(']')
 
-        buffer.push(']')
-    
-    else if value is JsonObject
-        JsonObject o = (JsonObject)value
-        buffer.push('{')
-        bool first = true
+        case JsonObject
+            buffer.push('{')
 
-        for int index in o.value
-            if not first
-                buffer.push(',')
+            bool first = true
+            for int index in value.value
+                if not first
+                    buffer.push(',')
 
-            jsonEncodeString(buffer, o.value.keys[index])
-            buffer.push(':')
-            jsonEncode(buffer, o.value.values[index])
+                jsonEncodeString(buffer, value.value.keys[index])
+                buffer.push(':')
+                jsonEncode(buffer, value.value.values[index])
 
-            first = false
+                first = false
 
-        buffer.push('}')
-    else
-        buffer.pushString("null")
+            buffer.push('}')
+        
+        default
+            buffer.pushString("null")
+
 
 class Map<K, V>
     K[] keys
