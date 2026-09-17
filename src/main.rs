@@ -1,20 +1,7 @@
 extern crate fastcgi;
 
 use std::{
-    alloc::Layout,
-    cmp,
-    collections::HashMap,
-    env::{self, args},
-    ffi::{CStr, CString, c_char, c_float, c_int, c_void},
-    fmt::Write as _,
-    fs,
-    io::{Read, Write},
-    net::TcpListener,
-    process::ExitCode,
-    ptr::{self, null},
-    rc::Rc,
-    slice,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    alloc::Layout, cmp, collections::HashMap, env::{self, args}, ffi::{CStr, CString, c_char, c_float, c_int, c_void}, fmt::Write as _, fs, io::{Read, Write}, net::TcpListener, path::{self, Path}, process::ExitCode, ptr::{self, null}, rc::Rc, slice, time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use bcrypt::DEFAULT_COST;
@@ -29,7 +16,7 @@ use uuid::Uuid;
 struct Script {
     modified: SystemTime,
     text: Rc<Vec<String>>,
-    mapping: Rc<Vec<(i32, i32)>>,
+    mappings: Rc<HashMap<String, Vec<(i32, i32)>>>,
     functions: Functions,
     vm: *const c_void,
 }
@@ -39,12 +26,11 @@ struct Context {
     input: String,
     output: String,
     headers: String,
-    text: Rc<Vec<String>>,
     environs: Rc<HashMap<String, String>>,
     connections: Vec<ConnectionThreadSafe>,
     statements: Vec<Statement>,
-    mapping: Rc<Vec<(i32, i32)>>,
-    path: String,
+    text: Rc<Vec<String>>,
+    mappings: Rc<HashMap<String, Vec<(i32, i32)>>>,
     functions: Functions,
 }
 
@@ -105,13 +91,9 @@ unsafe extern "C" {
     fn cyth_init() -> *const c_void;
     fn cyth_set_error_callback(vm: *const c_void, error_callback: *const c_void);
     fn cyth_set_panic_callback(vm: *const c_void, panic_callback: *const c_void);
-    fn cyth_load_function(
-        vm: *const c_void,
-        signature: *const c_char,
-        func: *const c_void,
-    ) -> c_int;
-    fn cyth_load_string(vm: *const c_void, filename: *const c_char, source: *const c_char)
-    -> c_int;
+    fn cyth_set_import_callback(vm: *const c_void, panic_callback: *const c_void);
+    fn cyth_load_function(vm: *const c_void, signature: *const c_char, func: *const c_void) -> c_int;
+    fn cyth_load_string(vm: *const c_void, filename: *const c_char, source: *const c_char) -> c_int;
     fn cyth_get_function_unsafe(vm: *const c_void, name: *const c_char) -> *const c_void;
     fn cyth_compile(vm: *const c_void) -> c_int;
     fn cyth_run(vm: *const c_void);
@@ -238,12 +220,11 @@ extern "C" fn error_callback(
     let message = unsafe { CStr::from_ptr(message).to_str().unwrap_or_default() };
     let filename = unsafe { CStr::from_ptr(filename).to_str().unwrap_or_default() };
 
-    let (mapped_line, mapped_column) = if filename == context.path {
-        context
-            .mapping
-            .get((start_line - 1) as usize)
-            .copied()
-            .unwrap_or((start_line, 0))
+    let (mapped_line, mapped_column) = if let Some(mapping) = context.mappings.get(filename) {
+        mapping
+        .get((start_line - 1) as usize)
+        .copied()
+        .unwrap_or((start_line, 0))
     } else {
         (start_line, 0)
     };
@@ -276,12 +257,11 @@ extern "C" fn panic_callback(
 
         context.output.push_str(&format!("{}\n", function));
     } else {
-        let (mapped_line, mapped_column) = if filename == context.path {
-            context
-                .mapping
-                .get((line - 1) as usize)
-                .copied()
-                .unwrap_or((line, 0))
+        let (mapped_line, mapped_column) = if let Some(mapping) = context.mappings.get(filename) {
+            mapping
+            .get((line - 1) as usize)
+            .copied()
+            .unwrap_or((line, 0))
         } else {
             (line, 0)
         };
@@ -294,6 +274,40 @@ extern "C" fn panic_callback(
             mapped_column + column,
         ));
     }
+}
+
+extern "C" fn import_callback(vm: *const c_void, filename: *const c_char, importer_filename: *const c_char) -> c_int {
+    let context = unsafe { &mut *CONTEXT };
+
+    let Ok(filename) = (unsafe { CStr::from_ptr(filename).to_str() }) else { return 0; };
+    let Ok(importer_filename) = (unsafe { CStr::from_ptr(importer_filename).to_str() }) else { return 0; };
+    let Ok(path) = ({
+       let filename = Path::new(filename);
+       if filename.is_absolute() {
+           path::absolute(filename)
+       } else {
+           let importer = Path::new(importer_filename);
+           path::absolute(
+            importer
+               .parent()
+               .unwrap_or_else(|| Path::new(""))
+               .join(filename)
+            )
+       }
+    }) else { return 0 };
+
+    let mut mapping = Vec::<(i32, i32)>::new();
+    let Some(text) = Rc::get_mut(&mut context.text) else { return 0 };
+    let Some(path) = path.to_str() else { return 0; };
+    let Some(source) = read_script(path, &mut mapping, text) else { return 0; };
+
+    let Some(mappings) = Rc::get_mut(&mut context.mappings) else { return 0 };
+    mappings.insert(path.to_string(), mapping);
+
+    let Ok(path) = CString::new(path) else { return 0; };
+    let Ok(source) = CString::new(source) else { return 0; };
+
+    return unsafe { cyth_load_string(vm, path.as_ptr(), source.as_ptr()) };
 }
 
 const BUILTINS: &str = r#"
@@ -735,7 +749,11 @@ class MapIterator
 
 static mut CONTEXT: *mut Context = ptr::null_mut();
 
-fn read_script(path: &String) -> (String, Vec<String>, Rc<Vec<(i32, i32)>>) {
+fn read_script(
+    path: &str,
+    mapping: &mut Vec<(i32, i32)>,
+    text: &mut Vec<String>,
+) -> Option<String> {
     fn dedent(
         input: &str,
         mapping: &mut Vec<(i32, i32)>,
@@ -774,12 +792,12 @@ fn read_script(path: &String) -> (String, Vec<String>, Rc<Vec<(i32, i32)>>) {
         result
     }
 
-    let input = fs::read_to_string(path).unwrap();
+    let Ok(input) = fs::read_to_string(path) else {
+        return None;
+    };
     let mut output = String::new();
 
     let mut code = false;
-    let mut text = Vec::<String>::new();
-    let mut mapping = Vec::<(i32, i32)>::new();
     let mut line = 1;
     let mut column = 1;
 
@@ -798,7 +816,7 @@ fn read_script(path: &String) -> (String, Vec<String>, Rc<Vec<(i32, i32)>>) {
         if code {
             if input.as_bytes()[i] == b'?' && i + 1 < input.len() && input.as_bytes()[i + 1] == b'>'
             {
-                output += &dedent(&input[start..i], &mut mapping, start_line, start_column);
+                output += &dedent(&input[start..i], mapping, start_line, start_column);
 
                 start_column = column + 1;
                 start_line = line;
@@ -826,7 +844,7 @@ fn read_script(path: &String) -> (String, Vec<String>, Rc<Vec<(i32, i32)>>) {
     }
 
     if code {
-        output += &dedent(&input[start..], &mut mapping, start_line, start_column);
+        output += &dedent(&input[start..], mapping, start_line, start_column);
     } else {
         if start < input.len() {
             output += "printInternal(";
@@ -842,13 +860,13 @@ fn read_script(path: &String) -> (String, Vec<String>, Rc<Vec<(i32, i32)>>) {
 
     mapping.push((line, column - 1));
 
-    (output, text, Rc::new(mapping))
+    Some(output)
 }
 
 fn run_script(req: &mut Request, context: &mut Context, script: &Script) {
     let instant = Instant::now();
     context.text = script.text.clone();
-    context.mapping = script.mapping.clone();
+    context.mappings = script.mappings.clone();
     context.functions = script.functions;
     context.environs = req.params();
     context.headers.clear();
@@ -1490,19 +1508,26 @@ fn request(mut req: Request, context: &mut Context, scripts: &mut HashMap<String
             .ne(&metadata.modified().unwrap())
     {
         unsafe {
-            let (source, text, mapping) = read_script(&path);
-            context.path = path;
-            context.mapping = mapping.clone();
+            let mut mapping = Vec::<(i32, i32)>::new();
+            let mut text = Vec::<String>::new();
+            let source = read_script(&path, &mut mapping, &mut text).unwrap();
+            
+            let mut mappings = HashMap::<String, Vec::<(i32, i32)>>::new();
+            mappings.insert(path.clone(), mapping);
+
+            context.text = text.into();
+            context.mappings = mappings.into();
             context.output.clear();
 
             let builtins = CString::new(BUILTINS).unwrap();
             let builtins_filename = c"<builtin>";
             let source = CString::new(source).unwrap();
-            let source_filename = CString::new(context.path.clone()).unwrap();
+            let source_filename = CString::new(path.clone()).unwrap();
 
             let vm = cyth_init();
             cyth_set_error_callback(vm, error_callback as *const c_void);
             cyth_set_panic_callback(vm, panic_callback as *const c_void);
+            cyth_set_import_callback(vm, import_callback as *const c_void);
             cyth_load_string(vm, builtins_filename.as_ptr(), builtins.as_ptr());
 
             let load_result = cyth_load_string(vm, source_filename.as_ptr(), source.as_ptr());
@@ -1528,9 +1553,9 @@ fn request(mut req: Request, context: &mut Context, scripts: &mut HashMap<String
 
             let script = Script {
                 vm,
-                mapping,
+                text: context.text.clone(),
+                mappings: context.mappings.clone(),
                 modified: metadata.modified().unwrap(),
-                text: text.into(),
                 functions: Functions {
                     json_number: std::mem::transmute(cyth_get_function_unsafe(
                         vm,
@@ -1564,7 +1589,7 @@ fn request(mut req: Request, context: &mut Context, scripts: &mut HashMap<String
             };
 
             run_script(&mut req, context, &script);
-            scripts.insert(context.path.clone(), script);
+            scripts.insert(path.clone(), script);
         }
     } else {
         unsafe {
