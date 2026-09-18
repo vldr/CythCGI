@@ -1,7 +1,21 @@
 extern crate fastcgi;
 
 use std::{
-    alloc::Layout, cmp, collections::HashMap, env::{self, args}, ffi::{CStr, CString, c_char, c_float, c_int, c_void}, fmt::Write as _, fs, io::{Read, Write}, net::TcpListener, path::{self, Path}, process::ExitCode, ptr::{self, null}, rc::Rc, slice, time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    alloc::Layout,
+    cmp,
+    collections::HashMap,
+    env::{self, args},
+    ffi::{CStr, CString, c_char, c_float, c_int, c_void},
+    fmt::Write as _,
+    fs,
+    io::{Read, Write},
+    net::TcpListener,
+    path::{self, Path},
+    process::ExitCode,
+    ptr::{self, null},
+    rc::Rc,
+    slice,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use bcrypt::DEFAULT_COST;
@@ -13,10 +27,15 @@ use fastcgi::Request;
 use sqlite::{Connection, ConnectionThreadSafe, State, Statement, Value};
 use uuid::Uuid;
 
+struct Import {
+    path: String,
+    modified: SystemTime
+}
+
 struct Script {
-    modified: SystemTime,
     text: Rc<Vec<String>>,
     mappings: Rc<HashMap<String, Vec<(i32, i32)>>>,
+    imports: Rc<Vec<Import>>,
     functions: Functions,
     vm: *const c_void,
 }
@@ -26,11 +45,12 @@ struct Context {
     input: String,
     output: String,
     headers: String,
-    environs: Rc<HashMap<String, String>>,
     connections: Vec<ConnectionThreadSafe>,
     statements: Vec<Statement>,
+    environs: Rc<HashMap<String, String>>,
     text: Rc<Vec<String>>,
     mappings: Rc<HashMap<String, Vec<(i32, i32)>>>,
+    imports: Rc<Vec<Import>>,
     functions: Functions,
 }
 
@@ -181,7 +201,7 @@ fn cyth_new_json(value: &serde_json::Value) -> *const c_void {
         },
         serde_json::Value::Array(values) => unsafe {
             (context.functions.json_array)(cyth_new_array(
-                values.iter().map(|value| cyth_new_json(value)),
+                values.iter().map(cyth_new_json),
             ))
         },
         serde_json::Value::Object(map) => unsafe {
@@ -296,18 +316,27 @@ extern "C" fn import_callback(vm: *const c_void, filename: *const c_char, import
        }
     }) else { return 0 };
 
+    let Some(path) = path.to_str() else { return 0; };
+    let Some(imports) = Rc::get_mut(&mut context.imports) else { return 0 };
+    let Some(mappings) = Rc::get_mut(&mut context.mappings) else { return 0 };
+    if mappings.contains_key(path) {
+        return 1;
+    }
+
     let mut mapping = Vec::<(i32, i32)>::new();
     let Some(text) = Rc::get_mut(&mut context.text) else { return 0 };
-    let Some(path) = path.to_str() else { return 0; };
-    let Some(source) = read_script(path, &mut mapping, text) else { return 0; };
+    let Some((source, modified)) = read_script(path, &mut mapping, text) else { return 0; };
 
-    let Some(mappings) = Rc::get_mut(&mut context.mappings) else { return 0 };
     mappings.insert(path.to_string(), mapping);
+    imports.push(Import { path: path.to_string(), modified });
 
-    let Ok(path) = CString::new(path) else { return 0; };
-    let Ok(source) = CString::new(source) else { return 0; };
-
-    return unsafe { cyth_load_string(vm, path.as_ptr(), source.as_ptr()) };
+    unsafe {
+        cyth_load_string(
+            vm,
+            CString::new(path).unwrap_unchecked().as_ptr(),
+            CString::new(source).unwrap_unchecked().as_ptr(),
+        )
+    }
 }
 
 const BUILTINS: &str = r#"
@@ -753,7 +782,7 @@ fn read_script(
     path: &str,
     mapping: &mut Vec<(i32, i32)>,
     text: &mut Vec<String>,
-) -> Option<String> {
+) -> Option<(String, SystemTime)> {
     fn dedent(
         input: &str,
         mapping: &mut Vec<(i32, i32)>,
@@ -792,11 +821,11 @@ fn read_script(
         result
     }
 
-    let Ok(input) = fs::read_to_string(path) else {
-        return None;
-    };
-    let mut output = String::new();
+    let Ok(metadata) = fs::metadata(path) else { return None; };
+    let Ok(modified) = metadata.modified() else { return None; };
+    let Ok(input) = fs::read_to_string(path) else { return None; };
 
+    let mut output = String::new();
     let mut code = false;
     let mut line = 1;
     let mut column = 1;
@@ -860,7 +889,7 @@ fn read_script(
 
     mapping.push((line, column - 1));
 
-    Some(output)
+    Some((output, modified))
 }
 
 fn run_script(req: &mut Request, context: &mut Context, script: &Script) {
@@ -1021,9 +1050,8 @@ fn compile_script(vm: *const c_void) -> c_int {
         unsafe extern "C" fn verify(password: *const CyString, hash: *const CyString) -> bool {
             let password = cyth_string_to_str(password);
             let hash = cyth_string_to_str(hash);
-            let output = bcrypt::verify(password, hash).unwrap();
 
-            output.into()
+            bcrypt::verify(password, hash).unwrap()
         }
         cyth_load_function(
             vm,
@@ -1047,6 +1075,19 @@ fn compile_script(vm: *const c_void) -> c_int {
         }
         cyth_load_function(vm, c"string query()".as_ptr(), query as *const c_void);
 
+        unsafe extern "C" fn method() -> *const CyString {
+            let context = unsafe { &mut *CONTEXT };
+            let default = String::new();
+            let query = context.environs.get("REQUEST_METHOD").unwrap_or(&default);
+
+            cyth_new_string(query)
+        }
+        cyth_load_function(
+            vm,
+            c"string method()".as_ptr(),
+            method as *const c_void,
+        );
+
         unsafe extern "C" fn header(input: *const CyString) {
             let context = unsafe { &mut *CONTEXT };
             let input = cyth_string_to_str(input);
@@ -1063,7 +1104,7 @@ fn compile_script(vm: *const c_void) -> c_int {
         unsafe extern "C" fn cookie(name: *const CyString) -> *const CyString {
             let context = unsafe { &mut *CONTEXT };
             let name = cyth_string_to_str(name);
-            let empty_string = "".to_owned();
+            let empty_string = String::new();
             let cookie = context.environs.get("HTTP_COOKIE").unwrap_or(&empty_string);
 
             if let Some(mut start) = cookie.find(&(name.to_owned() + "=")) {
@@ -1100,7 +1141,7 @@ fn compile_script(vm: *const c_void) -> c_int {
             let context = unsafe { &mut *CONTEXT };
             let key = cyth_string_to_str(key);
 
-            let empty_string = "".to_owned();
+            let empty_string = String::new();
             let environ = context.environs.get(key).unwrap_or(&empty_string);
 
             cyth_new_string(environ)
@@ -1227,9 +1268,7 @@ fn compile_script(vm: *const c_void) -> c_int {
                     context.connections.push(connection);
                     context.connections.len() as c_int
                 }
-                Err(error) => {
-                    println!("{:?}", error.message);
-
+                Err(_) => {
                     0
                 }
             }
@@ -1260,12 +1299,6 @@ fn compile_script(vm: *const c_void) -> c_int {
 
             let query = cyth_string_to_str(query);
             let Some(connection) = context.connections.get_mut((id - 1) as usize) else {
-                println!(
-                    "Failed to get connection: {} {} {}",
-                    query,
-                    id,
-                    context.connections.len()
-                );
                 return 0;
             };
 
@@ -1274,8 +1307,7 @@ fn compile_script(vm: *const c_void) -> c_int {
                     context.statements.push(statement);
                     context.statements.len() as c_int
                 }
-                Err(error) => {
-                    println!("{:?}", error.message);
+                Err(_) => {
                     0
                 }
             }
@@ -1488,35 +1520,43 @@ fn request(mut req: Request, context: &mut Context, scripts: &mut HashMap<String
         return;
     };
 
-    let Ok(metadata) = fs::metadata(&path) else {
-        write!(
-            &mut req.stdout(),
-            "{}{}",
-            "Status: 404 Not Found\n",
-            "Content-Type: text/plain\n\n"
-        )
-        .unwrap_or(());
-        return;
-    };
-
     let script = scripts.get_mut(&path);
-    if script.is_none()
-        || script
-            .as_ref()
-            .unwrap()
-            .modified
-            .ne(&metadata.modified().unwrap())
+    if script.is_none() || unsafe {
+        script
+        .as_ref()
+        .unwrap_unchecked()
+        .imports
+        .iter()
+        .any(|item| {
+            let Ok(metadata) = fs::metadata(&item.path) else { return true; };
+            let Ok(modified) = metadata.modified() else { return true; };
+            modified.ne(&item.modified)
+        })
+    }
     {
         unsafe {
             let mut mapping = Vec::<(i32, i32)>::new();
             let mut text = Vec::<String>::new();
-            let source = read_script(&path, &mut mapping, &mut text).unwrap();
-            
+            let Some((source, modified)) = read_script(&path, &mut mapping, &mut text) else {
+                write!(
+                    &mut req.stdout(),
+                    "{}{}",
+                    "Status: 404 Not Found\n",
+                    "Content-Type: text/plain\n\n"
+                )
+                .unwrap_or(());
+                return;
+            };
+
             let mut mappings = HashMap::<String, Vec::<(i32, i32)>>::new();
             mappings.insert(path.clone(), mapping);
 
+            let mut imports = Vec::<Import>::new();
+            imports.push(Import { path: path.clone(), modified });
+
             context.text = text.into();
             context.mappings = mappings.into();
+            context.imports = imports.into();
             context.output.clear();
 
             let builtins = CString::new(BUILTINS).unwrap();
@@ -1555,7 +1595,7 @@ fn request(mut req: Request, context: &mut Context, scripts: &mut HashMap<String
                 vm,
                 text: context.text.clone(),
                 mappings: context.mappings.clone(),
-                modified: metadata.modified().unwrap(),
+                imports: context.imports.clone(),
                 functions: Functions {
                     json_number: std::mem::transmute(cyth_get_function_unsafe(
                         vm,
@@ -1594,7 +1634,7 @@ fn request(mut req: Request, context: &mut Context, scripts: &mut HashMap<String
     } else {
         unsafe {
             let context = &mut *CONTEXT;
-            let script = script.unwrap();
+            let script = script.unwrap_unchecked();
             run_script(&mut req, context, script);
         }
     }
