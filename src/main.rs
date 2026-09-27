@@ -18,6 +18,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use flate2::{write::GzEncoder, Compression};
 use bcrypt::DEFAULT_COST;
 use chrono::{DateTime, Local};
 use markdown::{CompileOptions, Options};
@@ -36,7 +37,7 @@ struct Script {
     text: Rc<Vec<String>>,
     mappings: Rc<HashMap<String, Vec<(i32, i32)>>>,
     imports: Rc<Vec<Import>>,
-    functions: Functions,
+    functions: Rc<Functions>,
     vm: *const c_void,
 }
 
@@ -51,7 +52,7 @@ struct Context {
     text: Rc<Vec<String>>,
     mappings: Rc<HashMap<String, Vec<(i32, i32)>>>,
     imports: Rc<Vec<Import>>,
-    functions: Functions,
+    functions: Rc<Functions>,
 }
 
 #[repr(C)]
@@ -270,12 +271,11 @@ extern "C" fn panic_callback(
 
     if line == 0 && column == 0 {
         context.headers.clear();
-        context
-            .headers
-            .push_str("Status: 500 Internal Server Error\n");
-        context.headers.push_str("Content-Type: text/plain\n");
+        context.headers.push_str("Status: 500 Internal Server Error\r\n");
+        context.headers.push_str("Content-Type: text/plain\r\n");
 
-        context.output.push_str(&format!("{}\n", function));
+        context.output.push_str(function);
+        context.output.push('\n');
     } else {
         let (mapped_line, mapped_column) = if let Some(mapping) = context.mappings.get(filename) {
             mapping
@@ -896,7 +896,7 @@ fn run_script(req: &mut Request, context: &mut Context, script: &Script) {
     let instant = Instant::now();
     context.text = script.text.clone();
     context.mappings = script.mappings.clone();
-    context.functions = script.functions;
+    context.functions = script.functions.clone();
     context.environs = req.params();
     context.headers.clear();
     context.output.clear();
@@ -908,18 +908,34 @@ fn run_script(req: &mut Request, context: &mut Context, script: &Script) {
     if !context.headers.contains("Content-Type:") {
         context
             .headers
-            .push_str("Content-Type: text/html; charset=UTF-8\n");
+            .push_str("Content-Type: text/html; charset=UTF-8\r\n");
     }
 
+    let gzipped = context.environs.get("HTTP_ACCEPT_ENCODING")
+                                        .map_or(false, |v| v.contains("gzip"));
+    if gzipped {
+        context.headers.push_str("Content-Encoding: gzip\r\n");
+        context.headers.push_str("Vary: Accept-Encoding\r\n");
+    }
+
+    let mut stdout = req.stdout();
     write!(
-        &mut req.stdout(),
-        "Interval: {:?}\nContent-Length: {}\n{}\n{}",
-        instant.elapsed(),
-        context.output.len(),
+        &mut stdout,
+        "{}\
+        Interval: {:?}\r\n\
+        \r\n",
         context.headers,
-        context.output
+        instant.elapsed()
     )
-    .unwrap_or(());
+    .unwrap_or_default();
+
+    if gzipped {
+        let mut gzip = GzEncoder::new(&mut stdout, Compression::fast());
+        gzip.write_all(context.output.as_bytes()).unwrap_or_default();
+        gzip.finish().unwrap();
+    } else {
+        stdout.write_all(context.output.as_bytes()).unwrap_or_default();
+    }
 
     context.statements.clear();
     context.connections.clear();
@@ -1102,7 +1118,7 @@ fn compile_script(vm: *const c_void) -> c_int {
             let input = cyth_string_to_str(input);
 
             context.headers.push_str(input);
-            context.headers.push('\n');
+            context.headers.push_str("\r\n");
         }
         cyth_load_function(
             vm,
@@ -1520,9 +1536,10 @@ fn request(mut req: Request, context: &mut Context, scripts: &mut HashMap<String
     let Some(path) = req.param("SCRIPT_FILENAME") else {
         write!(
             &mut req.stdout(),
-            "{}{}{}",
-            "Status: 500 Internal Server Error\n",
-            "Content-Type: text/plain\n\n",
+            "Status: 500 Internal Server Error\r\n\
+            Content-Type: text/plain\r\n\
+            \r\n\
+            {}",
             "Missing 'SCRIPT_FILENAME' environment variable"
         )
         .unwrap_or(());
@@ -1549,9 +1566,9 @@ fn request(mut req: Request, context: &mut Context, scripts: &mut HashMap<String
             let Some((source, modified)) = read_script(&path, &mut mapping, &mut text) else {
                 write!(
                     &mut req.stdout(),
-                    "{}{}",
-                    "Status: 404 Not Found\n",
-                    "Content-Type: text/plain\n\n"
+                    "Status: 404 Not Found\r\n\
+                    Content-Type: text/plain\r\n\
+                    \r\n"
                 )
                 .unwrap_or(());
                 return;
@@ -1587,9 +1604,10 @@ fn request(mut req: Request, context: &mut Context, scripts: &mut HashMap<String
 
                 write!(
                     &mut req.stdout(),
-                    "{}{}{}",
-                    "Status: 500 Internal Server Error\n",
-                    "Content-Type: text/plain\n\n",
+                    "Status: 500 Internal Server Error\r\n\
+                    Content-Type: text/plain\r\n\
+                    \r\n\
+                    {}",
                     context.output
                 )
                 .unwrap_or(());
@@ -1634,7 +1652,7 @@ fn request(mut req: Request, context: &mut Context, scripts: &mut HashMap<String
                         vm,
                         c"Map<string, any>.__set__.void(string, any)".as_ptr(),
                     )),
-                },
+                }.into(),
             };
 
             run_script(&mut req, context, &script);

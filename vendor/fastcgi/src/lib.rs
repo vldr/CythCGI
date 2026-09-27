@@ -185,7 +185,7 @@ fn write_record<W: Write>(
     request_id: u16,
     content: &[u8],
 ) -> io::Result<()> {
-    assert!(content.len() <= std::u32::MAX as usize);
+    assert!(content.len() <= std::u16::MAX as usize);
     let request_id = unsafe { mem::transmute::<_, [u8; 2]>(request_id.to_be()) };
     let content_length = unsafe { mem::transmute::<_, [u8; 2]>((content.len() as u16).to_be()) };
     try!(w.write_all(&[
@@ -424,7 +424,7 @@ impl<'a> Read for Stdin<'a> {
 }
 
 macro_rules! writer {
-    ($Writer:ident) => {
+    ($Writer:ident, $record_type:expr) => {
         pub struct $Writer<'a> {
             req: &'a mut Request,
         }
@@ -441,11 +441,12 @@ macro_rules! writer {
                     Ok(0)
                 } else {
                     for chunk in buf.chunks(std::u16::MAX as usize) {
-                        let rec = Record::$Writer {
-                            request_id: self.req.id,
-                            content: chunk.to_owned(),
-                        };
-                        try!(rec.send(&mut &*self.req.sock));
+                        write_record(
+                            &mut &*self.req.sock,
+                            $record_type,
+                            self.req.id,
+                            chunk,
+                        )?;
                     }
                     Ok(buf.len())
                 }
@@ -458,9 +459,9 @@ macro_rules! writer {
     };
 }
 
-writer!(Stdout);
+writer!(Stdout, 6);
 
-writer!(Stderr);
+writer!(Stderr, 7);
 
 /// Request objects are what a FastCGI application will primarily deal with
 /// throughout its lifetime.
