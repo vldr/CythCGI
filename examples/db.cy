@@ -10,6 +10,9 @@ println(queries.contains("a") + "")
 println(queries.contains("") + queries[""])
 println(urlDecode("# hi<b></b> %E2%80%94") + query())
 
+println(markdown("<h1>Hi</h1>"))
+println(markdown("<h1>Hi</h1>", true))
+
 println(uuid())
 
 Database connection = Database(":memory:")

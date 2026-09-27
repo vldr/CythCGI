@@ -1018,13 +1018,13 @@ fn compile_script(vm: *const c_void) -> c_int {
             url_decode as *const c_void,
         );
 
-        unsafe extern "C" fn markdown(input: *const CyString) -> *const CyString {
+        unsafe extern "C" fn markdown_with_options(input: *const CyString, allow_dangerous_html: bool) -> *const CyString {
             let input = cyth_string_to_str(input);
             let output = markdown::to_html_with_options(
                 input,
                 &Options {
                     compile: CompileOptions {
-                        allow_dangerous_html: true,
+                        allow_dangerous_html,
                         ..Default::default()
                     },
                     ..Default::default()
@@ -1033,6 +1033,15 @@ fn compile_script(vm: *const c_void) -> c_int {
             .unwrap_or("".to_owned());
 
             cyth_new_string(&output)
+        }
+        cyth_load_function(
+            vm,
+            c"string markdown(string n, bool m)".as_ptr(),
+            markdown_with_options as *const c_void,
+        );
+
+        unsafe extern "C" fn markdown(input: *const CyString) -> *const CyString {
+            unsafe { markdown_with_options(input, false) }
         }
         cyth_load_function(
             vm,
