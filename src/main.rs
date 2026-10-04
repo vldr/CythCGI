@@ -1076,7 +1076,7 @@ fn compile_script(vm: *const c_void) -> c_int {
             let password = cyth_string_to_str(password);
             let hash = cyth_string_to_str(hash);
 
-            bcrypt::verify(password, hash).unwrap()
+            bcrypt::verify(password, hash).unwrap_or_default()
         }
         cyth_load_function(
             vm,

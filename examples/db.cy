@@ -15,6 +15,8 @@ println(markdown("<h1>Hi</h1>", true))
 
 println(uuid())
 
+println("Hash: " + verify("test", hash("test")))
+
 Database connection = Database(":memory:")
 bool result = connection.execute("
   CREATE TABLE IF NOT EXISTS users (name TEXT, age INTEGER, data BLOB);
