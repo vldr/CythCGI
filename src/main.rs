@@ -901,7 +901,7 @@ fn run_script(req: &mut Request, context: &mut Context, script: &Script) {
     context.headers.clear();
     context.output.clear();
     context.input.clear();
-    req.stdin().read_to_string(&mut context.input).unwrap();
+    req.stdin().read_to_string(&mut context.input).ok();
 
     unsafe { cyth_run(script.vm) };
 
@@ -926,15 +926,14 @@ fn run_script(req: &mut Request, context: &mut Context, script: &Script) {
         \r\n",
         context.headers,
         instant.elapsed()
-    )
-    .unwrap_or_default();
+    ).ok();
 
     if gzipped {
         let mut gzip = GzEncoder::new(&mut stdout, Compression::fast());
-        gzip.write_all(context.output.as_bytes()).unwrap_or_default();
-        gzip.finish().unwrap();
+        gzip.write_all(context.output.as_bytes()).ok();
+        gzip.finish().ok();
     } else {
-        stdout.write_all(context.output.as_bytes()).unwrap_or_default();
+        stdout.write_all(context.output.as_bytes()).ok();
     }
 
     context.statements.clear();
@@ -1067,7 +1066,7 @@ fn compile_script(vm: *const c_void) -> c_int {
 
         unsafe extern "C" fn hash(input: *const CyString) -> *const CyString {
             let input = cyth_string_to_str(input);
-            let output = bcrypt::hash(input, DEFAULT_COST).unwrap();
+            let output = bcrypt::hash(input, DEFAULT_COST).unwrap_or_default();
             cyth_new_string(&output)
         }
         cyth_load_function(vm, c"string hash(string n)".as_ptr(), hash as *const c_void);
