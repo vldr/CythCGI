@@ -9,9 +9,10 @@ use std::{
     fmt::Write as _,
     fs,
     io::{Read, Write},
-    net::TcpListener,
+    net::{SocketAddr, TcpListener},
     path::{self, Path},
     process::ExitCode,
+    str::FromStr,
     ptr::{self, null},
     rc::Rc,
     slice,
@@ -1671,9 +1672,11 @@ fn info() {
     eprintln!();
 
     #[cfg(unix)]
-    eprintln!("When no arguments are provided, cyth-cgi expects file descriptor 0 to be a");
+    eprintln!("When an argument is provided, cyth-cgi will bind and listen on the");
     #[cfg(unix)]
-    eprintln!("listening UNIX socket provided by systemd or another service manager.");
+    eprintln!("given TCP address (if it's in the IP:PORT format) or will create");
+    #[cfg(unix)]
+    eprintln!("and listen on a UNIX socket at the given path.");
 
     #[cfg(windows)]
     eprintln!("When no arguments are provided, cyth-cgi expects the standard input");
@@ -1682,8 +1685,12 @@ fn info() {
     #[cfg(windows)]
     eprintln!("will do this for you automatically when its protocol is set to TCP.");
 
+    
+    #[cfg(windows)]
     eprintln!();
+    #[cfg(windows)]
     eprintln!("When an argument is provided, cyth-cgi will bind and listen on the");
+    #[cfg(windows)]
     eprintln!("given TCP address.");
 }
 
@@ -1696,27 +1703,26 @@ fn main() -> ExitCode {
     };
 
     if env::args().count() > 1 {
-        let listener = TcpListener::bind(args().nth(1).unwrap()).unwrap();
-        fastcgi::run_tcp(move |req| request(req, context, &mut scripts), &listener);
+        let input = args().nth(1).unwrap();
+
+        if let Ok(socket) = SocketAddr::from_str(&input) {
+            let listener = TcpListener::bind(socket).unwrap();
+            fastcgi::run_tcp(move |req| request(req, context, &mut scripts), &listener);
+        } else {
+            #[cfg(unix)]
+            fastcgi::run(move |req| request(req, context, &mut scripts), &input);
+
+            #[cfg(windows)]
+            {
+                eprintln!("{} is not a valid IP socket format!", input);
+                return ExitCode::FAILURE;
+            }
+        }
     } else {
         #[cfg(unix)]
         {
-            let mut optval: libc::c_int = 0;
-            let mut optlen: libc::socklen_t = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-            if unsafe {
-                libc::getsockopt(
-                    0,
-                    libc::SOL_SOCKET,
-                    libc::SO_TYPE,
-                    &mut optval as *mut _ as *mut libc::c_void,
-                    &mut optlen,
-                ) == -1
-            } {
-                info();
-                return ExitCode::FAILURE;
-            }
-
-            fastcgi::run(move |req| request(req, context, &mut scripts));
+            info();
+            return ExitCode::FAILURE;
         }
 
         #[cfg(windows)]

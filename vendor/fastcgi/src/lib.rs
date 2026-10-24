@@ -49,7 +49,10 @@ use std::net::TcpListener;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::thread;
+use std::path::Path;
 
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener};
 #[cfg(unix)]
 use unix::{Socket, Transport};
 #[cfg(unix)]
@@ -711,11 +714,18 @@ where
 /// Runs as a FastCGI process with the given handler.
 ///
 /// Available under Unix only. If you are using Windows, use `run_tcp` instead.
-pub fn run<F>(handler: F)
+pub fn run<F>(handler: F, path: &str)
 where
     F: FnMut(Request),
 {
-    run_transport(handler, &mut Transport::new())
+    use std::os::fd::IntoRawFd;
+
+    if Path::new(path).exists() {
+        std::fs::remove_file(path).unwrap();
+    }
+
+    let listener = UnixListener::bind(path).unwrap();
+    run_transport(handler, &mut Transport::from_raw_fd(listener.into_raw_fd()));
 }
 
 #[cfg(unix)]
