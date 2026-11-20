@@ -475,168 +475,105 @@ class Statement
     bool next()
         return sqliteNext(stmt)
 
-class JsonNumber
-    float value
+alias JsonValue = any
+alias JsonBool = bool
+alias JsonNumber = float
+alias JsonInteger = int
+alias JsonString = string
+alias JsonArray = JsonValue[]
+alias JsonObject = Map<JsonString, JsonValue>
 
-    void __init__()
-    void __init__(float value)
-        this.value = value
+any jsonNumber(JsonNumber value)
+    return value
 
-any jsonNumber(float value)
-    return JsonNumber(value)
+any jsonString(JsonString value)
+    return value
 
-class JsonString
-    string value
+any jsonBool(JsonBool value)
+    return value
 
-    void __init__()
-    void __init__(string value)
-        this.value = value
+any jsonArray(JsonArray value)
+    return value
 
-any jsonString(string value)
-    return JsonString(value)
+any jsonObject(JsonObject value)
+    return value
 
-class JsonBool
-    bool value
+string jsonEncode(JsonValue value)
+    void jsonEncodeString(char[] buffer, string value)
+        buffer.push('"')
 
-    void __init__()
-    void __init__(bool value)
-        this.value = value
-
-any jsonBool(bool value)
-    return JsonBool(value)
-
-class JsonArray
-    any[] value
-
-    void __init__()
-    void __init__(any[] value)
-        this.value = value
-
-    any __get__(int index)
-        return this.value[index]
-    
-    void push(bool value)
-        this.value.push(JsonBool(value))
-
-    void push(float value)
-        this.value.push(JsonNumber(value))
-
-    void push(string value)
-        this.value.push(JsonString(value))
-    
-    void push(JsonArray value)
-        this.value.push(value)
-    
-    void push(JsonObject value)
-        this.value.push(value)
-
-    int length()
-        return this.value.length
-
-any jsonArray(any[] value)
-    return JsonArray(value)
-
-class JsonObject
-    Map<string, any> value
-
-    void __init__()
-        this.value = Map<string, any>()
-
-    void __init__(Map<string, any> value)
-        this.value = value
-
-    void __set__(string key, bool val)
-        this.value[key] = JsonBool(val)
+        for char c in value
+            if c == '"'
+                buffer.push('\\')
+                buffer.push('"')
+            else if c == '\\'
+                buffer.push('\\')
+                buffer.push('\\')
+            else if c == '\n'
+                buffer.push('\\')
+                buffer.push('n')
+            else if c == '\r'
+                buffer.push('\\')
+                buffer.push('r')
+            else if c == '\t'
+                buffer.push('\\')
+                buffer.push('t')
+            else
+                buffer.push(c)
         
-    void __set__(string key, float val)
-        this.value[key] = JsonNumber(val)
+        buffer.push('"') 
 
-    void __set__(string key, string val)
-        this.value[key] = JsonString(val)
+    void jsonEncode(char[] buffer, JsonValue value)
+        match value
+            case JsonBool
+                buffer.pushString(value ? "true" : "false")
 
-    void __set__(string key, JsonArray val)
-        this.value[key] = val
-    
-    void __set__(string key, JsonObject val)
-        this.value[key] = val
+            case JsonNumber
+                buffer.pushString((string)value)
 
-    any __get__(string key)
-        return this.value[key]
+            case JsonInteger
+                buffer.pushString((string)value)
 
-any jsonObject(Map<string, any> value)
-    return JsonObject(value)
+            case JsonString
+                jsonEncodeString(buffer, value)
 
-void jsonEncodeString(char[] buffer, string value)
-    buffer.push('"')
+            case JsonArray
+                buffer.push('[')
 
-    for char c in value
-        if c == '"'
-            buffer.push('\\')
-            buffer.push('"')
-        else if c == '\\'
-            buffer.push('\\')
-            buffer.push('\\')
-        else if c == '\n'
-            buffer.push('\\')
-            buffer.push('n')
-        else if c == '\r'
-            buffer.push('\\')
-            buffer.push('r')
-        else if c == '\t'
-            buffer.push('\\')
-            buffer.push('t')
-        else
-            buffer.push(c)
+                for JsonValue value in value
+                    if it > 0
+                        buffer.push(',')
+                    
+                    jsonEncode(buffer, value)
 
-    buffer.push('"') 
+                buffer.push(']')
 
-string jsonEncode(any value)
+            case JsonObject
+                buffer.push('{')
+
+                bool first = true
+                for int index in value
+                    if not first
+                        buffer.push(',')
+
+                    jsonEncodeString(buffer, value.keys[index])
+                    buffer.push(':')
+                    jsonEncode(buffer, value.values[index])
+
+                    first = false
+
+                buffer.push('}')
+            
+            default
+                if not value
+                    panic("Unexpected JSON type!")
+
+                buffer.pushString("null")
+
     char[] buffer
     jsonEncode(buffer, value)
 
     return buffer.toString()
-
-void jsonEncode(char[] buffer, any value)
-    match value
-        case JsonBool
-            buffer.pushString(value.value ? "true" : "false")
-
-        case JsonNumber
-            buffer.pushString((string)value.value)
-
-        case JsonString
-            jsonEncodeString(buffer, value.value)
-
-        case JsonArray
-            buffer.push('[')
-
-            for any value in value.value
-                if it > 0
-                    buffer.push(',')
-                
-                jsonEncode(buffer, value)
-
-            buffer.push(']')
-
-        case JsonObject
-            buffer.push('{')
-
-            bool first = true
-            for int index in value.value
-                if not first
-                    buffer.push(',')
-
-                jsonEncodeString(buffer, value.value.keys[index])
-                buffer.push(':')
-                jsonEncode(buffer, value.value.values[index])
-
-                first = false
-
-            buffer.push('}')
-        
-        default
-            buffer.pushString("null")
-
 
 class Map<K, V>
     K[] keys

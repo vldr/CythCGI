@@ -289,6 +289,11 @@ static void error_invalid_arity(Token token, int expected, int got)
                               expected == 1 ? "parameter" : "parameters", got));
 }
 
+static void error_invalid_one_or_more_arity(Token token, int got)
+{
+  error(token, memory_sprintf("Expected 0 or 1 parameter but got %d.", got));
+}
+
 static void error_invalid_type_conversion(Token token, DataType from, DataType to)
 {
   error(token, memory_sprintf("Invalid type conversion from '%s' to '%s'.",
@@ -682,7 +687,10 @@ bool assignable_data_type(bool permissive, DataType destination, DataType source
 {
   if (destination.type == TYPE_ANY && permissive)
     return source.type == TYPE_OBJECT || source.type == TYPE_STRING || source.type == TYPE_ARRAY ||
-           source.type == TYPE_NULL || source.type == TYPE_ANY;
+           source.type == TYPE_NULL || source.type == TYPE_INTEGER || source.type == TYPE_FLOAT ||
+           source.type == TYPE_BOOL || source.type == TYPE_CHAR || source.type == TYPE_FUNCTION ||
+           source.type == TYPE_FUNCTION_MEMBER || source.type == TYPE_FUNCTION_INTERNAL ||
+           source.type == TYPE_FUNCTION_POINTER || source.type == TYPE_ANY;
 
   if (destination.type == TYPE_FLOAT && permissive)
     return source.type == TYPE_INTEGER;
@@ -782,7 +790,12 @@ static void data_type_inference(Expr** source_expression, DataType* source, Data
   }
   else if (target->type == TYPE_ANY &&
            (source->type == TYPE_OBJECT || source->type == TYPE_STRING ||
-            source->type == TYPE_ARRAY || source->type == TYPE_NULL || source->type == TYPE_ANY))
+            source->type == TYPE_ARRAY || source->type == TYPE_NULL ||
+            source->type == TYPE_INTEGER || source->type == TYPE_FLOAT ||
+            source->type == TYPE_BOOL || source->type == TYPE_CHAR ||
+            source->type == TYPE_FUNCTION || source->type == TYPE_FUNCTION_MEMBER ||
+            source->type == TYPE_FUNCTION_INTERNAL || source->type == TYPE_FUNCTION_POINTER ||
+            source->type == TYPE_ANY))
   {
     autocast(source_expression, source, target);
   }
@@ -832,6 +845,7 @@ static DataType token_to_data_type(Token token)
     }
     else if (variable->data_type.type == TYPE_ALIAS)
     {
+      link(token, variable->data_type.alias.name, variable->data_type.alias.name.length);
       return *variable->data_type.alias.data_type;
     }
     else
@@ -917,6 +931,7 @@ static DataType class_template_to_data_type(DataType template, DataTypeToken tem
     variable->scope = SCOPE_GLOBAL;
     variable->index = -1;
     variable->data_type.type = TYPE_ALIAS;
+    variable->data_type.alias.name = name;
     variable->data_type.alias.token = actual_data_type_token;
     variable->data_type.alias.data_type = ALLOC(DataType);
     *variable->data_type.alias.data_type = data_type_token_to_data_type(actual_data_type_token);
@@ -1025,6 +1040,7 @@ static DataType function_template_to_data_type(DataType template, DataTypeToken 
     variable->scope = SCOPE_GLOBAL;
     variable->index = -1;
     variable->data_type.type = TYPE_ALIAS;
+    variable->data_type.alias.name = name;
     variable->data_type.alias.token = data_type_token;
     variable->data_type.alias.data_type = template_data_types[i];
 
@@ -1143,6 +1159,9 @@ static void data_type_token_unalias(ArrayDataTypeToken* types)
 
     if (variable && variable->data_type.type == TYPE_ALIAS)
     {
+      link(array_at(types, i).token, variable->data_type.alias.name,
+           variable->data_type.alias.name.length);
+
       array_at(types, i) = variable->data_type.alias.token;
     }
 
@@ -1262,6 +1281,7 @@ static Expr* cast_to_bool(Expr* expression, DataType data_type)
     cast_expression->cast.from_data_type = data_type;
     cast_expression->cast.to_data_type = DATA_TYPE(TYPE_BOOL);
     cast_expression->cast.expr = expression;
+    cast_expression->cast.implicit = true;
 
     return cast_expression;
   }
@@ -1298,6 +1318,7 @@ static bool upcast(BinaryExpr* expression, DataType* left, DataType* right, Data
   cast_expression->cast.from_data_type = from;
   cast_expression->cast.to_data_type = to;
   cast_expression->cast.expr = *target;
+  cast_expression->cast.implicit = true;
 
   *target = cast_expression;
   *target_type = to;
@@ -1316,6 +1337,8 @@ static bool autocast(Expr** expression, DataType* from, DataType* to)
   cast_expression->cast.from_data_type = *from;
   cast_expression->cast.to_data_type = *to;
   cast_expression->cast.expr = *expression;
+  cast_expression->cast.implicit = true;
+
   *expression = cast_expression;
   *from = *to;
 
@@ -2000,6 +2023,29 @@ static void init_variable_declaration(VarStmt* statement)
     environment_set_variable(environment, name, statement);
 }
 
+static void init_alias_statement(AliasStmt* statement)
+{
+  const char* name = statement->name.lexeme;
+
+  VarStmt* variable = ALLOC(VarStmt);
+  variable->name = statement->name;
+  variable->type = statement->data_type_token;
+  variable->initializer = NULL;
+  variable->function = NULL;
+  variable->scope = SCOPE_GLOBAL;
+  variable->index = -1;
+  variable->data_type.type = TYPE_ALIAS;
+  variable->data_type.alias.name = statement->name;
+  variable->data_type.alias.token = statement->data_type_token;
+  variable->data_type.alias.data_type = ALLOC(DataType);
+  *variable->data_type.alias.data_type = data_type_token_to_data_type(statement->data_type_token);
+
+  if (environment_check_variable(checker.environment, name))
+    error_name_already_exists(statement->name, name);
+  else
+    environment_set_variable(checker.environment, name, variable);
+}
+
 static void init_class_declaration_body(ClassStmt* statement)
 {
   Environment* previous_environment = checker.environment;
@@ -2065,6 +2111,7 @@ static DataType check_cast_expression(CastExpr* expression)
       case TYPE_CHAR:
       case TYPE_INTEGER:
       case TYPE_STRING:
+      case TYPE_ANY:
         valid = true;
         break;
 
@@ -2081,6 +2128,7 @@ static DataType check_cast_expression(CastExpr* expression)
       case TYPE_FLOAT:
       case TYPE_STRING:
       case TYPE_CHAR:
+      case TYPE_ANY:
         valid = true;
         break;
 
@@ -2096,6 +2144,7 @@ static DataType check_cast_expression(CastExpr* expression)
       case TYPE_BOOL:
       case TYPE_INTEGER:
       case TYPE_STRING:
+      case TYPE_ANY:
         valid = true;
         break;
 
@@ -2111,6 +2160,7 @@ static DataType check_cast_expression(CastExpr* expression)
       case TYPE_FLOAT:
       case TYPE_INTEGER:
       case TYPE_STRING:
+      case TYPE_ANY:
         valid = true;
         break;
 
@@ -2169,9 +2219,14 @@ static DataType check_cast_expression(CastExpr* expression)
       switch (expression->to_data_type.type)
       {
       case TYPE_ANY:
+      case TYPE_BOOL:
+      case TYPE_CHAR:
+      case TYPE_INTEGER:
+      case TYPE_FLOAT:
       case TYPE_STRING:
       case TYPE_ARRAY:
       case TYPE_OBJECT:
+      case TYPE_FUNCTION_POINTER:
         valid = true;
         break;
 
@@ -2200,6 +2255,7 @@ static DataType check_cast_expression(CastExpr* expression)
       case TYPE_NULL:
       case TYPE_STRING:
       case TYPE_BOOL:
+      case TYPE_ANY:
         valid = true;
         break;
 
@@ -2262,6 +2318,7 @@ static DataType check_cast_expression(CastExpr* expression)
     case TYPE_FUNCTION_INTERNAL:
       switch (expression->to_data_type.type)
       {
+      case TYPE_ANY:
       case TYPE_STRING:
         valid = true;
         break;
@@ -3029,15 +3086,29 @@ static DataType check_call_expression(CallExpr* expression)
   }
   else if (callee_data_type.type == TYPE_ALIAS)
   {
+    DataType data_type = *callee_data_type.alias.data_type;
+
     int number_of_arguments = array_size(&expression->arguments);
-    if (number_of_arguments > 1)
+    if (number_of_arguments == 1)
     {
-      error_invalid_arity(expression->callee_token, 0, number_of_arguments);
-      return DATA_TYPE(TYPE_VOID);
+      DataType argument_data_type = argument_data_types[0];
+
+      data_type_inference(&expression->arguments.elems[0], &argument_data_type, &data_type);
+
+      if (!equal_data_type(argument_data_type, data_type) &&
+          !assignable_data_type(false, data_type, argument_data_type))
+      {
+        error_type_mismatch(expression->argument_tokens.elems[0], data_type, argument_data_type);
+        checker.error = false;
+      }
+    }
+    else if (number_of_arguments != 0)
+    {
+      error_invalid_one_or_more_arity(expression->callee_token, number_of_arguments);
     }
 
     expression->callee_data_type = callee_data_type;
-    expression->return_data_type = *callee_data_type.alias.data_type;
+    expression->return_data_type = data_type;
 
     return expression->return_data_type;
   }
@@ -3980,6 +4051,15 @@ static void check_import_statement(ImportStmt* statement)
        statement->filename.end_column - statement->filename.start_column);
 }
 
+static void check_alias_statement(ImportStmt* statement)
+{
+  if (checker.environment != checker.global_environment)
+  {
+    error_unexpected_import(statement->keyword);
+    return;
+  }
+}
+
 static void check_if_statement(IfStmt* statement)
 {
   DataType data_type = check_expression(statement->condition);
@@ -4141,9 +4221,7 @@ static void check_match_statement(MatchStmt* statement)
     }
     else
     {
-      if (variable_statement->data_type.type != TYPE_STRING &&
-          variable_statement->data_type.type != TYPE_ARRAY &&
-          variable_statement->data_type.type != TYPE_OBJECT)
+      if (!assignable_data_type(true, DATA_TYPE(TYPE_ANY), variable_statement->data_type))
       {
         error_cannot_cast_to_any(variable_statement->type.token, variable_statement->data_type);
         checker.error = false;
@@ -4419,6 +4497,9 @@ static void check_statement(Stmt* statement, bool synchronize)
   case STMT_IMPORT:
     check_import_statement(&statement->import);
     return;
+  case STMT_ALIAS:
+    check_alias_statement(&statement->import);
+    return;
   case STMT_FUNCTION_DECL:
     check_function_declaration(&statement->func);
     return;
@@ -4471,6 +4552,7 @@ static bool analyze_statement(Stmt* statement)
   case STMT_CONTINUE:
   case STMT_BREAK:
   case STMT_IMPORT:
+  case STMT_ALIAS:
   case STMT_FUNCTION_DECL:
   case STMT_VARIABLE_DECL:
   case STMT_CLASS_DECL:
@@ -4572,6 +4654,25 @@ void checker_validate(void)
         break;
       case STMT_FUNCTION_TEMPLATE_DECL:
         init_function_template_declaration(&statement->func_template);
+        break;
+
+      default:
+        break;
+      }
+    }
+  }
+
+  array_foreach(&checker.statements_list, statements)
+  {
+    Stmt* statement;
+    array_foreach(&statements, statement)
+    {
+      checker.error = false;
+
+      switch (statement->type)
+      {
+      case STMT_ALIAS:
+        init_alias_statement(&statement->alias);
         break;
 
       default:
